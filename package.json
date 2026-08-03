@@ -13,7 +13,6 @@
     "capture": "node scripts/capture-proof.mjs http://127.0.0.1:4177/"
   },
   "dependencies": {
-    "three": "^0.178.0",
     "vite": "^8.0.3"
   },
   "devDependencies": {

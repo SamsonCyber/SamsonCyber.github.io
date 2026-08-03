@@ -3,12 +3,12 @@
 :root {
   --void: #0a0e14;
   --text: #e8ecf1;
-  --text-dim: #9aa3b2;
-  --text-mute: #6b7380;
-  --accent: #5eead4;
-  --accent-dim: rgba(94, 234, 212, 0.12);
+  --text-dim: #a8b0bc;
+  --text-mute: #7a8290;
+  --accent: #e8ecf1;
+  --accent-dim: rgba(232, 236, 241, 0.08);
   --line: rgba(232, 236, 241, 0.08);
-  --line-strong: rgba(232, 236, 241, 0.14);
+  --line-strong: rgba(232, 236, 241, 0.16);
   --surface: rgba(255, 255, 255, 0.02);
 
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -74,7 +74,7 @@ body {
   z-index: var(--z-vignette);
   pointer-events: none;
   background:
-    radial-gradient(ellipse 60% 45% at 70% 0%, rgba(94, 234, 212, 0.05), transparent 55%),
+    radial-gradient(ellipse 55% 40% at 20% 0%, rgba(232, 236, 241, 0.03), transparent 50%),
     linear-gradient(180deg, rgba(10, 14, 20, 0.15) 0%, transparent 30%, transparent 70%, rgba(10, 14, 20, 0.9) 100%);
 }
 
@@ -174,28 +174,27 @@ a:focus-visible {
   max-width: var(--max);
   margin: 0 auto;
   padding: clamp(2.5rem, 8vh, 5rem) var(--pad) clamp(2.5rem, 6vh, 4rem);
-  display: grid;
-  gap: 2rem 3rem;
-  align-items: center;
   border-bottom: 1px solid var(--line);
 }
 
 @media (min-width: 900px) {
   .hero {
-    grid-template-columns: minmax(0, 1.15fr) minmax(16rem, 0.85fr);
-    min-height: min(70dvh, 36rem);
+    min-height: min(58dvh, 30rem);
+    display: flex;
+    align-items: center;
   }
 }
 
 .hero__left {
   min-width: 0;
+  max-width: 40rem;
 }
 
 .hero__greeting {
   font-family: var(--font-mono);
   font-size: 0.8rem;
   font-weight: 500;
-  color: var(--accent);
+  color: var(--text-mute);
   margin-bottom: 0.85rem;
   letter-spacing: 0.02em;
 }
@@ -232,43 +231,6 @@ a:focus-visible {
   margin-top: 1.75rem;
 }
 
-.hero__badge {
-  position: relative;
-  width: 100%;
-  min-height: 18rem;
-  max-width: 22rem;
-  margin-inline: auto;
-  border-radius: 0.5rem;
-  touch-action: none;
-  cursor: grab;
-  user-select: none;
-}
-
-.hero__badge:active {
-  cursor: grabbing;
-}
-
-.hero__badge canvas {
-  display: block;
-  width: 100% !important;
-  height: 100% !important;
-  min-height: 18rem;
-  border-radius: 0.5rem;
-}
-
-.hero__badge-hint {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0.5rem;
-  text-align: center;
-  font-size: 0.7rem;
-  font-family: var(--font-mono);
-  color: var(--text-mute);
-  pointer-events: none;
-  opacity: 0.7;
-}
-
 .sr-only {
   position: absolute;
   width: 1px;
@@ -301,15 +263,15 @@ a:focus-visible {
 }
 
 .btn--primary {
-  background: var(--accent-dim);
-  border-color: rgba(94, 234, 212, 0.45);
-  color: var(--accent);
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--void);
 }
 
 .btn--primary:hover {
-  background: rgba(94, 234, 212, 0.18);
+  background: transparent;
   color: var(--text);
-  border-color: var(--accent);
+  border-color: var(--text-dim);
 }
 
 .btn--ghost:hover {
@@ -412,9 +374,9 @@ a:focus-visible {
 }
 
 .filter-btn[aria-pressed="true"] {
-  color: var(--accent);
+  color: var(--text);
   background: var(--accent-dim);
-  border-color: rgba(94, 234, 212, 0.25);
+  border-color: var(--line-strong);
 }
 
 .filter-btn:focus-visible {
@@ -462,7 +424,7 @@ a:focus-visible {
 .project__meta {
   font-size: 0.75rem;
   font-family: var(--font-mono);
-  color: var(--accent);
+  color: var(--text-mute);
   padding-top: 0.3rem;
   text-transform: none;
   letter-spacing: 0.01em;
@@ -615,7 +577,7 @@ a.project__name:hover {
 .resume-item__sub {
   font-size: 0.8rem;
   font-family: var(--font-mono);
-  color: var(--accent);
+  color: var(--text-mute);
   margin: 0.3rem 0 0.55rem;
   letter-spacing: 0.01em;
   text-transform: none;
