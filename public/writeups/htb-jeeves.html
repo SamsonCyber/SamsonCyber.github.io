@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jeeves &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Jeeves</h1>
+    
+    <div class="tags"><span class="tag">Windows</span><span class="tag">Jenkins</span><span class="tag">Groovy</span><span class="tag">SMB</span><span class="tag">credentialhunting</span><span class="tag">PassTheHash</span><span class="tag">KeePass</span><span class="tag">ADS</span><span class="tag">SeImpersonate</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#port-50000-jetty-jenkins">Port 50000, Jetty / Jenkins</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, they cover Nmap and initial directory bruteforcing of both port 80 and port 50000, up to discovery of the <code>/askjeeves</code> Jenkins endpoint. The subsequent steps (Jenkins exploitation, privilege escalation, and root) are not documented in the source notes; written as in-progress.</p>
+</blockquote>
+<p>Jeeves is a medium Windows box. Port 80 is a decoy IIS site. The real attack surface is Jetty on port 50000, which hosts an unauthenticated Jenkins instance at <code>/askjeeves</code>.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE      VERSION
+80/tcp    open  http         Microsoft IIS httpd 10.0
+135/tcp   open  msrpc        Microsoft Windows RPC
+445/tcp   open  microsoft-ds Microsoft Windows 7 - 10
+50000/tcp open  http         Jetty 9.4.z-SNAPSHOT
+</code></pre>
+<p>IIS on port 80 presented an "Ask Jeeves" search page. Both GoBuster passes against port 80 found nothing:</p>
+<pre><code class="language-sh">gobuster dir -u http://10.129.228.112/ -w /path/to/big.txt
+# Progress: 20476 / 20477 (100.00%) — zero results
+</code></pre>
+<h3 id="port-50000-jetty-jenkins">Port 50000, Jetty / Jenkins</h3>
+<p>The same small wordlist also returned nothing on port 50000. Switching to the larger <code>directory-list-2.3-medium.txt</code> wordlist found one directory:</p>
+<pre><code class="language-sh">gobuster dir -u http://10.129.228.112:50000/ -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
+/askjeeves  (Status: 302) --&gt; http://10.129.228.112:50000/askjeeves/
+</code></pre>
+<blockquote>
+<p><strong>Why the small wordlist missed it:</strong> common-word lists prioritize short, generic path components (<code>admin</code>, <code>api</code>, <code>login</code>). Application-specific paths like <code>askjeeves</code> only appear in larger content-discovery lists. When a standard pass returns nothing, switching wordlists before giving up often reveals hidden surfaces.</p>
+</blockquote>
+<p>Browsing to <code>http://10.129.228.112:50000/askjeeves/</code> presented a Jenkins dashboard with no authentication required.</p>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, the Jenkins RCE (via Groovy script console), privilege escalation (likely KeePass credential hunting or SeImpersonate), and root steps are not documented. The chain up to an unauthenticated Jenkins instance is covered above.</p>
+</blockquote>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Port 50000 is a common Jetty/Jenkins default.</strong> Always enumerate non-standard HTTP ports, not just 80 and 443.</li>
+<li><strong>The small wordlist is a starting filter, not a final answer.</strong> When it returns nothing, escalate to medium or large lists before assuming no content exists.</li>
+<li><strong>Unauthenticated Jenkins is immediate code execution.</strong> The Groovy script console at <code>/askjeeves/script</code> executes arbitrary code as the Jenkins process user with no credentials needed.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

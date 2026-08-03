@@ -1,0 +1,21 @@
+{
+  "name": "samson-portfolio",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "writeups:index": "node scripts/build-writeups-index.mjs",
+    "build": "node scripts/build-writeups-index.mjs && vite build",
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.js",
+    "verify": "node --test tests/*.test.js && vite build",
+    "capture": "node scripts/capture-proof.mjs http://127.0.0.1:4177/"
+  },
+  "dependencies": {
+    "vite": "^8.0.3"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

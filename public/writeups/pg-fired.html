@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fired &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Fired</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Openfire</span><span class="tag">CVE</span><span class="tag">RCE</span><span class="tag">SSH</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#cve-identification">CVE Identification</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Fired is a Linux box running Openfire 4.7.3, an XMPP server with a web admin console on port 9090. Openfire 4.7.3 is vulnerable to CVE-2023-32315, an authentication bypass that allows unauthenticated access to the admin plugin upload functionality, leading to remote code execution.</p>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, they identify the open ports and the Openfire version, and name the CVE. No commands beyond the Nmap scan are documented; the exploit execution and post-foothold steps are not recorded. Written as in-progress.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE                VERSION
+22/tcp   open  ssh                    OpenSSH 8.2p1 Ubuntu 4ubuntu0.11
+9090/tcp open  hadoop-tasktracker     Apache Hadoop  [Openfire admin console]
+9091/tcp open  ssl/hadoop-tasktracker Apache Hadoop  [Openfire admin console TLS]
+</code></pre>
+<p>The nmap service fingerprint misidentifies the service as Apache Hadoop, but the HTTP title and response content identify it as Openfire. Visiting port 9090 in a browser presents:</p>
+<pre><code>Openfire, Version: 4.7.3
+</code></pre>
+<h3 id="cve-identification">CVE Identification</h3>
+<p>Openfire 4.7.3 is vulnerable to <strong>CVE-2023-32315</strong>, an authentication bypass in the admin console that allows unauthenticated users to upload plugins. Since Openfire plugins are JAR files executed by the Java runtime, this is effectively an unauthenticated remote code execution primitive.</p>
+<blockquote>
+<p><strong>How CVE-2023-32315 works:</strong> Openfire's admin console has a path traversal flaw in its setup wizard endpoint that remains accessible even after setup is complete. An attacker can use this endpoint to create a new admin account without authentication. Once authenticated as the new admin, they upload a malicious plugin JAR that executes a reverse shell when the plugin loads.</p>
+</blockquote>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>XMPP/Openfire admin consoles should never be internet-facing.</strong> The plugin upload mechanism is designed for legitimate extensions but becomes an RCE path when authentication can be bypassed.</li>
+<li><strong>CVE-2023-32315 affects all Openfire versions before 4.7.5.</strong> Version fingerprinting the login page is enough to identify the vulnerability without any active exploitation attempt.</li>
+<li><strong>Nmap's service fingerprints can misclassify Java-based web apps.</strong> When the fingerprint looks wrong (Apache Hadoop on a pentest box), visit the port directly before making assumptions.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

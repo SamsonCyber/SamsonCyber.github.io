@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAMSON · Samson Laird · LLM / Agent Security &amp; Agentic Trading</title>
+  <meta name="description" content="Samson Laird. LLM and agent security engineer, OSCP, agentic trading systems. St. Louis. Detectors, red-team harnesses, control planes. GitHub SamsonCyber." />
+  <meta name="author" content="Samson Laird" />
+  <meta name="theme-color" content="#0e1014" />
+  <link rel="canonical" href="https://samsoncyber.com/" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="SAMSON · Samson Laird" />
+  <meta property="og:description" content="LLM / agent security and agentic trading. OSCP. St. Louis. Public tools: Garbleworks, StegOFF, field guide, agent control planes." />
+  <meta property="og:url" content="https://samsoncyber.com/" />
+
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="SAMSON · Samson Laird" />
+  <meta name="twitter:description" content="LLM / agent security and agentic trading. OSCP. St. Louis." />
+
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230e1014'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='system-ui,sans-serif' font-weight='800' font-size='12' fill='%23ff5c39'%3ES%3C/text%3E%3C/svg%3E" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <canvas id="bg" aria-hidden="true"></canvas>
+  <div class="vignette" aria-hidden="true"></div>
+
+  <div class="site">
+    <header class="topbar">
+      <a class="topbar__mark" href="#top">Samson Laird</a>
+      <nav aria-label="Primary">
+        <ul class="nav">
+          <li><a href="#work">Work</a></li>
+          <li><a href="#approach">Approach</a></li>
+          <li><a href="#background">Background</a></li>
+          <li><a href="#connect">Connect</a></li>
+          <li><a href="./writeups/">Writeups</a></li>
+        </ul>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero__left">
+          <p class="hero__eyebrow">Portfolio · St. Louis</p>
+          <h1 class="hero__title" id="hero-title"><span>SAMSON</span></h1>
+          <p class="sr-name">Samson Laird</p>
+        </div>
+        <div class="hero__right">
+          <p class="hero__role" id="hero-role">LLM / agent security &amp; agentic trading · OSCP</p>
+          <p class="hero__lede" id="hero-lede">I build detectors, red-team harnesses, and control planes for tool-using agents, and agentic systems that trade under the same kind of gates. Mechanism first. Measure, then claim.</p>
+          <div class="hero__actions">
+            <a class="btn btn--primary" href="#work">Selected work</a>
+            <a class="btn btn--ghost" id="btn-email" href="mailto:shotgunsamm6@gmail.com">Email</a>
+          </div>
+        </div>
+      </section>
+
+      <!-- Static contact + projects hydrate/overwrite via main.js when JS runs.
+           Present in the document so crawlers and no-JS still see the resume surface. -->
+      <section class="contact-strip" id="contact" aria-label="Contact">
+        <div class="contact-strip__grid" id="contact-grid">
+          <div class="contact-cell">
+            <span class="contact-cell__label">Email</span>
+            <a href="mailto:shotgunsamm6@gmail.com">shotgunsamm6@gmail.com</a>
+          </div>
+          <div class="contact-cell">
+            <span class="contact-cell__label">GitHub</span>
+            <a href="https://github.com/SamsonCyber" rel="noopener noreferrer" target="_blank">github.com/SamsonCyber</a>
+          </div>
+          <div class="contact-cell">
+            <span class="contact-cell__label">LinkedIn</span>
+            <a href="https://linkedin.com/in/samsonlaird" rel="noopener noreferrer" target="_blank">linkedin.com/in/samsonlaird</a>
+          </div>
+          <div class="contact-cell">
+            <span class="contact-cell__label">Hack The Box</span>
+            <a href="https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092" rel="noopener noreferrer" target="_blank">Hack The Box</a>
+          </div>
+          <div class="contact-cell">
+            <span class="contact-cell__label">Location</span>
+            <span class="contact-cell__value">St. Louis, Missouri</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="work" aria-labelledby="work-title">
+        <div class="section__head">
+          <div>
+            <p class="section__label">Selected work</p>
+            <h2 class="section__title" id="work-title">Projects</h2>
+          </div>
+          <div class="filters" role="group" aria-label="Filter projects by lane">
+            <button type="button" class="filter-btn" data-lane="all" aria-pressed="true">All</button>
+            <button type="button" class="filter-btn" data-lane="security" aria-pressed="false">Security</button>
+            <button type="button" class="filter-btn" data-lane="trading" aria-pressed="false">Trading</button>
+            <button type="button" class="filter-btn" data-lane="tradecraft" aria-pressed="false">Tradecraft</button>
+          </div>
+        </div>
+        <p id="project-live" class="project-live" aria-live="polite">8 projects · All lanes</p>
+        <ul class="project-list" id="project-list">
+          <li class="project" data-lane="security" data-id="garbleworks">
+            <div class="project__meta">LLM red team</div>
+            <div>
+              <a class="project__name" href="https://github.com/SamsonCyber/garbleworks" rel="noopener noreferrer" target="_blank">Garbleworks</a>
+              <p class="project__blurb">Authorized red-team harness: composable attack recipes, evolve/search, scoped fire, MCP + TUI. SSRF and engagement scope gates on every fire path.</p>
+              <p class="project__proof">python scripts/repro.py → REPRO_OK</p>
+            </div>
+            <div class="project__links"><a href="https://github.com/SamsonCyber/garbleworks" rel="noopener noreferrer" target="_blank">Repository</a></div>
+          </li>
+          <li class="project" data-lane="security" data-id="stegoff">
+            <div class="project__meta">Defense library</div>
+            <div>
+              <a class="project__name" href="https://github.com/SamsonCyber/stegoff" rel="noopener noreferrer" target="_blank">StegOFF</a>
+              <p class="project__blurb">Pre-ingest gate: scan text and files for stego and prompt injection before they hit an LLM. check / clean API and CLI.</p>
+              <p class="project__proof">Offline pytest suite · REPRO_OK</p>
+            </div>
+            <div class="project__links"><a href="https://github.com/SamsonCyber/stegoff" rel="noopener noreferrer" target="_blank">Repository</a></div>
+          </li>
+          <li class="project" data-lane="security" data-id="field-guide">
+            <div class="project__meta">Reference</div>
+            <div>
+              <a class="project__name" href="https://github.com/SamsonCyber/llm-injection-field-guide" rel="noopener noreferrer" target="_blank">LLM Injection Field Guide</a>
+              <p class="project__blurb">Dark Promptery: 324 techniques across 20 categories, defense fields, crosswalked to OWASP LLM Top 10, MITRE ATLAS, NIST, and CWE.</p>
+              <p class="project__proof">Live catalog · zero-build HTML</p>
+            </div>
+            <div class="project__links">
+              <a href="https://github.com/SamsonCyber/llm-injection-field-guide" rel="noopener noreferrer" target="_blank">Repository</a>
+              <a href="https://samsoncyber.github.io/llm-injection-field-guide/" rel="noopener noreferrer" target="_blank">Live</a>
+            </div>
+          </li>
+          <li class="project" data-lane="security" data-id="agentic-dm-gateway">
+            <div class="project__meta">Control plane</div>
+            <div>
+              <a class="project__name" href="https://github.com/SamsonCyber/agentic-dm-gateway" rel="noopener noreferrer" target="_blank">Agentic DM Gateway</a>
+              <p class="project__blurb">Security control plane for LLM agents over private DMs: allowlist, PIN, kill switch, rate limits, injection heuristics, secret redaction, audit log.</p>
+              <p class="project__proof">12 security unit tests · REPRO_OK</p>
+            </div>
+            <div class="project__links"><a href="https://github.com/SamsonCyber/agentic-dm-gateway" rel="noopener noreferrer" target="_blank">Repository</a></div>
+          </li>
+          <li class="project" data-lane="security" data-id="agent-canary">
+            <div class="project__meta">Tripwires</div>
+            <div>
+              <a class="project__name" href="https://github.com/SamsonCyber/agent-canary" rel="noopener noreferrer" target="_blank">Agent Canary</a>
+              <p class="project__blurb">Tripwire detection for autonomous agents: file honeypots, MCP tool traps, API decoys, forensic alerts.</p>
+              <p class="project__proof">Public package + tests</p>
+            </div>
+            <div class="project__links"><a href="https://github.com/SamsonCyber/agent-canary" rel="noopener noreferrer" target="_blank">Repository</a></div>
+          </li>
+          <li class="project" data-lane="security" data-id="agent-trap-lab">
+            <div class="project__meta">Eval lab</div>
+            <div>
+              <a class="project__name" href="https://github.com/SamsonCyber/agent-trap-lab" rel="noopener noreferrer" target="_blank">Agent Trap Lab</a>
+              <p class="project__blurb">AI web-browsing agent trap lab: adversarial pages, StegOFF defense matrix, Ollama evaluation harness. Publishes defended vs gap verdicts.</p>
+              <p class="project__proof">Detector unit tests offline</p>
+            </div>
+            <div class="project__links"><a href="https://github.com/SamsonCyber/agent-trap-lab" rel="noopener noreferrer" target="_blank">Repository</a></div>
+          </li>
+          <li class="project" data-lane="tradecraft" data-id="cantina">
+            <div class="project__meta">OSCP recon</div>
+            <div>
+              <a class="project__name" href="https://github.com/SamsonCyber/cantina" rel="noopener noreferrer" target="_blank">Cantina</a>
+              <p class="project__blurb">OSCP-legal network recon orchestrator: port scan, service enum plugins, multi-target timeouts. Enumeration only. No exploit auto-run.</p>
+              <p class="project__proof">pytest suite</p>
+            </div>
+            <div class="project__links"><a href="https://github.com/SamsonCyber/cantina" rel="noopener noreferrer" target="_blank">Repository</a></div>
+          </li>
+          <li class="project" data-lane="trading" data-id="raven">
+            <div class="project__meta">Agentic trading</div>
+            <div>
+              <span class="project__name">Raven</span>
+              <p class="project__blurb">Quant + agent swarm platform: microstructure signals, walk-forward validation, multi-agent market simulation. Same control-plane discipline as the security stack: kill switches, audit, measurement.</p>
+              <p class="project__note">Invite / lab platform. Not a public product repo.</p>
+              <p class="project__proof">Private lab; control-plane ideas mirror agentic-dm-gateway (kill, audit, gates)</p>
+            </div>
+            <div class="project__links"></div>
+          </li>
+        </ul>
+      </section>
+
+      <section class="section" id="approach" aria-labelledby="approach-title">
+        <div class="section__head">
+          <div>
+            <p class="section__label">How I work</p>
+            <h2 class="section__title" id="approach-title">Approach</h2>
+          </div>
+        </div>
+        <div class="approach-grid" id="approach-grid">
+          <article class="approach-card">
+            <h3>Mechanism first</h3>
+            <p>Name the failure mode, not only the meme payload. Catalog techniques by how they slip past training and filters.</p>
+          </article>
+          <article class="approach-card">
+            <h3>Measure, then claim</h3>
+            <p>Re-fire, bounds, honest gaps. One lucky hit is not a result. Flagships ship a single offline repro command.</p>
+          </article>
+          <article class="approach-card">
+            <h3>Scope gates</h3>
+            <p>SSRF and engagement receipts on harness fire paths. Authorized targets only: lab, CTF, written engagement, in-scope bounty.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="background" aria-labelledby="background-title">
+        <div class="section__head">
+          <div>
+            <p class="section__label">Resume</p>
+            <h2 class="section__title" id="background-title">Background</h2>
+          </div>
+        </div>
+        <div class="resume-block" id="resume-block">
+          <article class="resume-item">
+            <h3>Environmental Restoration LLC</h3>
+            <p class="resume-item__sub">IT operations · 2022-present</p>
+            <p>Two-person IT team, ~300 users nationwide, CMMC Level 2 environment. Own pieces of Device Control, BitLocker architecture, Autopilot modernization, and control-mapped policy work (NIST 800-171).</p>
+          </article>
+          <article class="resume-item">
+            <h3>Offensive security</h3>
+            <p class="resume-item__sub">OSCP · lab and CTF</p>
+            <p>OSCP. 100+ machines rooted across HTB, Proving Grounds, TryHackMe, and VulnHub. Active Directory chains, Linux and Windows privilege escalation. Writeups published for retired boxes.</p>
+          </article>
+          <article class="resume-item">
+            <h3>B.S. Cybersecurity</h3>
+            <p class="resume-item__sub">Maryville University · 2025</p>
+            <p>Three tracks: risk and compliance, offensive methods, and defensive operations. Graduated 2025.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="connect" aria-labelledby="connect-title">
+        <div class="section__head">
+          <div>
+            <p class="section__label">Elsewhere</p>
+            <h2 class="section__title" id="connect-title">Connect</h2>
+          </div>
+        </div>
+        <ul class="link-row" id="link-row">
+          <li><a href="https://github.com/SamsonCyber" rel="noopener noreferrer" target="_blank">GitHub</a></li>
+          <li><a href="https://linkedin.com/in/samsonlaird" rel="noopener noreferrer" target="_blank">LinkedIn</a></li>
+          <li><a href="https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092" rel="noopener noreferrer" target="_blank">Hack The Box</a></li>
+          <li><a href="https://samsoncyber.github.io/llm-injection-field-guide/" rel="noopener noreferrer" target="_blank">Field guide (live)</a></li>
+          <li><a href="./writeups/">CTF writeups</a></li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Samson Laird · St. Louis</p>
+      <p>
+        <a href="mailto:shotgunsamm6@gmail.com">Email</a>
+        ·
+        <a href="https://github.com/SamsonCyber" rel="noopener noreferrer" target="_blank">GitHub</a>
+        ·
+        <a href="https://linkedin.com/in/samsonlaird" rel="noopener noreferrer" target="_blank">LinkedIn</a>
+        ·
+        <a href="https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092" rel="noopener noreferrer" target="_blank">HTB</a>
+      </p>
+    </footer>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

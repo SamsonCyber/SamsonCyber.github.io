@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hunit &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Hunit</h1>
+    <div class="meta">Target: <code>192.168.180.125</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">API</span><span class="tag">InfoDisclosure</span><span class="tag">CredentialReuse</span><span class="tag">SSH</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#api-enumeration">API Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#ssh-as-dademola">SSH as dademola</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Hunit runs a small web application on port 8080 that exposes a JSON API with no authentication, including an endpoint that returns every user's plaintext credentials. One of those accounts has SSH access to the box on a non-standard port. These notes cover reconnaissance and initial access; the privilege escalation path is not documented.</p>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, covers recon through SSH foothold only; privilege escalation and root are not documented.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE     VERSION
+8080/tcp  open  http-proxy
+12445/tcp open  netbios-ssn Samba smbd 4.6.2
+18030/tcp open  http        Apache httpd 2.4.46 ((Unix))
+43022/tcp open  ssh         OpenSSH 8.4 (protocol 2.0)
+</code></pre>
+<p>The layout is unusual: SSH on 43022, SMB on 12445, two separate HTTP services. Port 18030 served a page titled "Whack A Mole!" with no obvious attack surface. Port 8080 was the interesting one.</p>
+<h3 id="api-enumeration">API Enumeration</h3>
+<p>Browsing port 8080 served a landing page of poems. Checking the page source revealed a link to <code>/api/</code>. Following that exposed a self-describing route listing:</p>
+<pre><code>&quot;/api/&quot;
+&quot;/article/&quot;
+&quot;/article/?&quot;
+&quot;/user/&quot;
+&quot;/user/?&quot;
+</code></pre>
+<blockquote>
+<p><strong>Why unauthenticated API route listing matters:</strong> a route index like this hands you the full application map. The <code>/user/</code> endpoint in particular is a red flag, user resources should require authentication before returning any data.</p>
+</blockquote>
+<p>Visiting <code>/api/user/</code> returned every account in the system with passwords in plaintext:</p>
+<pre><code class="language-json">login: &quot;rjackson&quot;    password: &quot;‹redacted›&quot;    description: &quot;Editor&quot;
+login: &quot;jsanchez&quot;    password: &quot;‹redacted›&quot;     description: &quot;Editor&quot;
+login: &quot;dademola&quot;    password: &quot;‹redacted›&quot; description: &quot;Admin&quot;
+login: &quot;jwinters&quot;    password: &quot;‹redacted›&quot;     description: &quot;Editor&quot;
+login: &quot;jvargas&quot;     password: &quot;‹redacted›&quot;     description: &quot;Editor&quot;
+</code></pre>
+<blockquote>
+<p><strong>Plaintext passwords in an API response:</strong> this is a design failure, not a misconfiguration. The database is storing (or the API is returning) unhashed credentials. Any unauthenticated read of this endpoint is a full credential dump for every account. The <code>Admin</code> role made <code>dademola</code> the priority target.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="ssh-as-dademola">SSH as dademola</h3>
+<p>The editor accounts could be API credentials with no system access, but the Admin account <code>dademola</code> had a notably different password format. Testing it against the non-standard SSH port:</p>
+<pre><code class="language-sh">ssh -p 43022 dademola@192.168.180.125
+dademola@192.168.180.125's password:
+[dademola@hunit ~]$ whoami
+dademola
+</code></pre>
+<p>SSH authenticated successfully on the first attempt.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Always check API endpoints for unauthenticated access before anything else.</strong> A single GET to <code>/api/user/</code> replaced every other recon step here.</li>
+<li><strong>Non-standard ports hide services from careless scanners.</strong> SSH on 43022 would be missed by a default <code>nmap</code> scan without <code>-p-</code> or explicit port ranges.</li>
+<li><strong>Admin-flagged accounts in credential dumps are the priority target.</strong> <code>dademola</code>'s "Admin" description made it the obvious choice when testing for system access.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

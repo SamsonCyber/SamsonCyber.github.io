@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0e1014">
+<title>CTF Writeups | Samson Laird</title>
+<meta name="description" content="Hack The Box and Proving Grounds writeups by Samson Laird. Enumeration, foothold, privilege escalation. Flags redacted.">
+<link rel="canonical" href="./index.html">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="home" href="../">Portfolio</a>
+    <span class="brand">
+      <a class="home" href="https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092" rel="noopener noreferrer" target="_blank" style="color:var(--coral);letter-spacing:0.12em">HTB profile</a>
+      · Writeups
+    </span>
+  </header>
+  <main class="index">
+    <h1>CTF Writeups</h1>
+    <p class="lede">Walkthroughs of retired Hack The Box and Proving Grounds machines: enumeration, foothold, privilege escalation. Flags, hashes, and credentials are redacted. 101 boxes.</p>
+    <section class="index-section">
+  <h2>Hack The Box <span class="count">(36)</span></h2>
+  <div class="grid"><a class="card" href="./htb-active.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Active</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SMB</span><span class="tag">GPP</span></div>
+</a>
+<a class="card" href="./htb-acute.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Acute</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">PSWA</span><span class="tag">RestrictedShell</span></div>
+</a>
+<a class="card" href="./htb-analytics.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Analytics</span>
+  <div class="tags"><span class="tag">CVE</span><span class="tag">Linux</span><span class="tag">RCE</span><span class="tag">Metabase</span></div>
+</a>
+<a class="card" href="./htb-bashed.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Bashed</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Gobuster</span><span class="tag">phpbash</span><span class="tag">busybox</span></div>
+</a>
+<a class="card" href="./htb-bounty.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Bounty</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">IIS</span><span class="tag">UploadBypass</span><span class="tag">webconfig</span></div>
+</a>
+<a class="card" href="./htb-broker.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Broker</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">CVE</span><span class="tag">ApacheActiveMQ</span><span class="tag">Jenkins</span></div>
+</a>
+<a class="card" href="./htb-buff.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Buff</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">CVE</span><span class="tag">GymManagementSoftware</span><span class="tag">RCE</span></div>
+</a>
+<a class="card" href="./htb-busqueda.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Busqueda</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Python</span><span class="tag">CMDInjection</span><span class="tag">git</span></div>
+</a>
+<a class="card" href="./htb-cascade.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Cascade</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">RPC</span><span class="tag">LDAP</span></div>
+</a>
+<a class="card" href="./htb-codify.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Codify</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Nodejs</span><span class="tag">vm2</span><span class="tag">sandbox</span></div>
+</a>
+<a class="card" href="./htb-cozyhosting.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">CozyHosting</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">SpringBoot</span><span class="tag">Actuator</span><span class="tag">CMDInjection</span></div>
+</a>
+<a class="card" href="./htb-devvortex.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Devvortex</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Joomla</span><span class="tag">CVE</span><span class="tag">subdomainenum</span></div>
+</a>
+<a class="card" href="./htb-falafel.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Falafel</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">PHP</span><span class="tag">SQLi</span><span class="tag">SQLMap</span></div>
+</a>
+<a class="card" href="./htb-flight.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Flight</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">subdomainbrute</span><span class="tag">LFI</span></div>
+</a>
+<a class="card" href="./htb-forest.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Forest</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">RPC</span><span class="tag">ASREPRoast</span></div>
+</a>
+<a class="card" href="./htb-irked.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Irked</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">IRC</span><span class="tag">UnrealIRCd</span><span class="tag">steghide</span></div>
+</a>
+<a class="card" href="./htb-jeeves.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Jeeves</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">Jenkins</span><span class="tag">Groovy</span><span class="tag">SMB</span></div>
+</a>
+<a class="card" href="./htb-knife.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Knife</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">php</span><span class="tag">CVE</span><span class="tag">backdoor</span></div>
+</a>
+<a class="card" href="./htb-love.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Love</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">SSRF</span><span class="tag">VotingSystem</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./htb-mentor.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Mentor</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">SNMP</span><span class="tag">SNMPBrute</span><span class="tag">api</span></div>
+</a>
+<a class="card" href="./htb-monitored.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Monitored</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">SNMP</span><span class="tag">NagiosXI</span><span class="tag">SQLi</span></div>
+</a>
+<a class="card" href="./htb-monteverde.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Monteverde</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SMB</span><span class="tag">passwordspraying</span></div>
+</a>
+<a class="card" href="./htb-networked.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Networked</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Apache</span><span class="tag">php</span><span class="tag">UploadBypass</span></div>
+</a>
+<a class="card" href="./htb-pandora.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Pandora</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">SNMP</span><span class="tag">credentialhunting</span><span class="tag">SSH</span></div>
+</a>
+<a class="card" href="./htb-pilgrimage.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Pilgrimage</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">git</span><span class="tag">CVE</span><span class="tag">ImageMagick</span></div>
+</a>
+<a class="card" href="./htb-poison.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Poison</span>
+  <div class="tags"><span class="tag">FreeBSD</span><span class="tag">PHP</span><span class="tag">LFI</span><span class="tag">LogPoisoning</span></div>
+</a>
+<a class="card" href="./htb-precious.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Precious</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">CVE</span><span class="tag">pdfkit</span><span class="tag">CMDInjection</span></div>
+</a>
+<a class="card" href="./htb-remote.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Remote</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">NFS</span><span class="tag">Umbraco</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./htb-return.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Return</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">Responder</span><span class="tag">LDAP</span></div>
+</a>
+<a class="card" href="./htb-sauna.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Sauna</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">LDAP</span><span class="tag">Kerbrute</span></div>
+</a>
+<a class="card" href="./htb-secnotes.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">SecNotes</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">IIS</span><span class="tag">CSRF</span><span class="tag">XSRF</span></div>
+</a>
+<a class="card" href="./htb-servmon.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">ServMon</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">FTP</span><span class="tag">Anonymous</span><span class="tag">PathTraversal</span></div>
+</a>
+<a class="card" href="./htb-sunday.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Sunday</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Finger</span><span class="tag">Solaris</span><span class="tag">PasswordSpray</span></div>
+</a>
+<a class="card" href="./htb-tabby.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Tabby</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">LFI</span><span class="tag">Tomcat</span><span class="tag">WAR</span></div>
+</a>
+<a class="card" href="./htb-tartarsauce.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">TartarSauce</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">WordPress</span><span class="tag">WPScan</span><span class="tag">RFI</span></div>
+</a>
+<a class="card" href="./htb-timelapse.html">
+  <span class="badge htb">HTB</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Timelapse</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SMB</span><span class="tag">PFX</span></div>
+</a></div>
+</section>
+    <section class="index-section">
+  <h2>Proving Grounds <span class="count">(65)</span></h2>
+  <div class="grid"><a class="card" href="./pg-access.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Access</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">Kerberoast</span><span class="tag">FileUpload</span></div>
+</a>
+<a class="card" href="./pg-algernon.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Algernon</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">SmarterMail</span><span class="tag">DotNetDeserialization</span><span class="tag">CVE-2019-7214</span></div>
+</a>
+<a class="card" href="./pg-apex.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Apex</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">FileManager</span><span class="tag">PathTraversal</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./pg-astronaut.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Astronaut</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">GravCMS</span><span class="tag">CVE</span><span class="tag">YAML</span></div>
+</a>
+<a class="card" href="./pg-authby.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">AuthBy</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">FTP</span><span class="tag">BasicAuth</span><span class="tag">HashCracking</span></div>
+</a>
+<a class="card" href="./pg-billyboss.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">BillyBoss</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">Nexus</span><span class="tag">CeWL</span><span class="tag">Hydra</span></div>
+</a>
+<a class="card" href="./pg-boolean.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Boolean</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">WebApp</span><span class="tag">AuthBypass</span><span class="tag">MassAssignment</span></div>
+</a>
+<a class="card" href="./pg-bratarina.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Bratarina</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">SMTP</span><span class="tag">OpenSMTPD</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./pg-bullybox.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">BullyBox</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">git</span><span class="tag">GitDumper</span><span class="tag">BoxBilling</span></div>
+</a>
+<a class="card" href="./pg-clue.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Clue</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">CassandraWeb</span><span class="tag">PathTraversal</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./pg-cockpit.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Cockpit</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Gobuster</span><span class="tag">FeroxBuster</span><span class="tag">SQLi</span></div>
+</a>
+<a class="card" href="./pg-craft.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Craft</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ODT</span><span class="tag">MacroExecution</span><span class="tag">PhishingUpload</span></div>
+</a>
+<a class="card" href="./pg-dvr4.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">DVR4</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">DirectoryTraversal</span><span class="tag">CVE-2018-15745</span><span class="tag">WeakEncryption</span></div>
+</a>
+<a class="card" href="./pg-exfiltrated.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Exfiltrated</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">SubrionCMS</span><span class="tag">CVE</span><span class="tag">FileUpload</span></div>
+</a>
+<a class="card" href="./pg-exghost.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">ExGhost</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">FTP</span><span class="tag">DefaultCreds</span><span class="tag">PCAP</span></div>
+</a>
+<a class="card" href="./pg-extplorer.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Extplorer</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Gobuster</span><span class="tag">DefaultCreds</span><span class="tag">john</span></div>
+</a>
+<a class="card" href="./pg-fantastic.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Fantastic</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Grafana</span><span class="tag">CVE</span><span class="tag">PathTraversal</span></div>
+</a>
+<a class="card" href="./pg-fired.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Fired</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Openfire</span><span class="tag">CVE</span><span class="tag">RCE</span></div>
+</a>
+<a class="card" href="./pg-fish.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Fish</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">GlassFish</span><span class="tag">DirectoryTraversal</span><span class="tag">SynaMan</span></div>
+</a>
+<a class="card" href="./pg-flu.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Flu</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">AtlassianConfluence</span><span class="tag">CVE</span><span class="tag">RCE</span></div>
+</a>
+<a class="card" href="./pg-hawat.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Hawat</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">SourceCodeReview</span><span class="tag">SQLi</span><span class="tag">DefaultCreds</span></div>
+</a>
+<a class="card" href="./pg-heist.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Heist</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SSRF</span><span class="tag">NTLMCapture</span></div>
+</a>
+<a class="card" href="./pg-hetemit.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Hetemit</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Python</span><span class="tag">RCE</span><span class="tag">Werkzeug</span></div>
+</a>
+<a class="card" href="./pg-hokkaido.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Hokkaido</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">Kerberoasting</span><span class="tag">TargetedKerberoasting</span></div>
+</a>
+<a class="card" href="./pg-hunit.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Hunit</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">API</span><span class="tag">InfoDisclosure</span><span class="tag">CredentialReuse</span></div>
+</a>
+<a class="card" href="./pg-hutch.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Hutch</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">LDAP</span><span class="tag">PasswordInDescription</span></div>
+</a>
+<a class="card" href="./pg-internal.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Internal</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">SMB</span><span class="tag">MS09-050</span><span class="tag">srv2sys</span></div>
+</a>
+<a class="card" href="./pg-jacko.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Jacko</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">H2Database</span><span class="tag">JNI</span><span class="tag">RCE</span></div>
+</a>
+<a class="card" href="./pg-kevin.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Kevin</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">HPPowerManager</span><span class="tag">BufferOverflow</span><span class="tag">CVE-2009-2685</span></div>
+</a>
+<a class="card" href="./pg-lavita.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">LaVita</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Laravel</span><span class="tag">CVE-2021-3129</span><span class="tag">RCE</span></div>
+</a>
+<a class="card" href="./pg-law.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Law</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">htmLawed</span><span class="tag">RCE</span><span class="tag">BurpSuite</span></div>
+</a>
+<a class="card" href="./pg-levram.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Levram</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Gerapy</span><span class="tag">CVE-2021-43857</span><span class="tag">DefaultCreds</span></div>
+</a>
+<a class="card" href="./pg-marketing.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Marketing</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Gobuster</span><span class="tag">VirtualHost</span><span class="tag">LimeSurvey</span></div>
+</a>
+<a class="card" href="./pg-medjed.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">MedJed</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">WebDAV</span><span class="tag">FTP</span><span class="tag">BarracudaDrive</span></div>
+</a>
+<a class="card" href="./pg-mice.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Mice</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">RemoteMouse</span><span class="tag">RCE</span><span class="tag">FileZilla</span></div>
+</a>
+<a class="card" href="./pg-monster.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Monster</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">MonstraCMS</span><span class="tag">MD5</span><span class="tag">hashcat</span></div>
+</a>
+<a class="card" href="./pg-muddy.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Muddy</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">XXE</span><span class="tag">SOAP</span><span class="tag">Ladon</span></div>
+</a>
+<a class="card" href="./pg-mzeeav.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">MZEEAV</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">FileUpload</span><span class="tag">MagicBytes</span><span class="tag">SourceCodeReview</span></div>
+</a>
+<a class="card" href="./pg-nagoya.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Nagoya</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">PasswordSpray</span><span class="tag">Kerberoast</span></div>
+</a>
+<a class="card" href="./pg-nibbles.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Nibbles</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">PostgreSQL</span><span class="tag">RCE</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./pg-nickel.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Nickel</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">HTTPVerbTampering</span><span class="tag">ProcessDump</span><span class="tag">Base64</span></div>
+</a>
+<a class="card" href="./pg-nukem.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Nukem</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">WordPress</span><span class="tag">FileUpload</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./pg-ochima.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Ochima</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Maltrail</span><span class="tag">RCE</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./pg-payday.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">PayDay</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">CSCart</span><span class="tag">DefaultCreds</span><span class="tag">AuthenticatedRCE</span></div>
+</a>
+<a class="card" href="./pg-pc.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">PC</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">ttyd</span><span class="tag">WebTerminal</span><span class="tag">rpc</span></div>
+</a>
+<a class="card" href="./pg-pelican.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Pelican</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Exhibitor</span><span class="tag">ZooKeeper</span><span class="tag">CommandInjection</span></div>
+</a>
+<a class="card" href="./pg-peppo.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Peppo</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">ident</span><span class="tag">DefaultCreds</span><span class="tag">rbash</span></div>
+</a>
+<a class="card" href="./pg-postfish.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">PostFish</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">SMTP</span><span class="tag">Phishing</span><span class="tag">POP3</span></div>
+</a>
+<a class="card" href="./pg-pyloader.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">PyLoader</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">pyLoad</span><span class="tag">CVE-2023-0297</span><span class="tag">PreAuthRCE</span></div>
+</a>
+<a class="card" href="./pg-quackerjack.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">QuackerJack</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">rConfig</span><span class="tag">SQLInjection</span><span class="tag">HashCracking</span></div>
+</a>
+<a class="card" href="./pg-readys.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Readys</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">WordPress</span><span class="tag">LFI</span><span class="tag">Redis</span></div>
+</a>
+<a class="card" href="./pg-resourced.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Resourced</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">NullSession</span><span class="tag">PasswordInDescription</span></div>
+</a>
+<a class="card" href="./pg-roquefort.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">RoqueFort</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Gitea</span><span class="tag">RCE</span><span class="tag">CVE</span></div>
+</a>
+<a class="card" href="./pg-shenzi.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Shenzi</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">SMB</span><span class="tag">WordPress</span><span class="tag">NullSession</span></div>
+</a>
+<a class="card" href="./pg-slort.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Slort</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">RFI</span><span class="tag">PHP</span><span class="tag">XAMPP</span></div>
+</a>
+<a class="card" href="./pg-snookums.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Snookums</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">RFI</span><span class="tag">LFI</span><span class="tag">PwnKit</span></div>
+</a>
+<a class="card" href="./pg-sorcerer.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Sorcerer</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">NFS</span><span class="tag">SSH</span><span class="tag">SCPWrapper</span></div>
+</a>
+<a class="card" href="./pg-spidersociety.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">SpiderSociety</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">DefaultCreds</span><span class="tag">FTP</span><span class="tag">CredentialHunting</span></div>
+</a>
+<a class="card" href="./pg-squid.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Squid</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">SquidProxy</span><span class="tag">SSRF</span><span class="tag">phpMyAdmin</span></div>
+</a>
+<a class="card" href="./pg-sybarys.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Sybarys</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">Redis</span><span class="tag">FTP</span><span class="tag">RedisModules</span></div>
+</a>
+<a class="card" href="./pg-vault.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Windows</span>
+  <span class="card-title">Vault</span>
+  <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SMB</span><span class="tag">NTLMTheft</span></div>
+</a>
+<a class="card" href="./pg-walla.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Walla</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">DefaultCreds</span><span class="tag">RaspAP</span><span class="tag">WebConsole</span></div>
+</a>
+<a class="card" href="./pg-wheels.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">Wheels</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">XPathInjection</span><span class="tag">AccountTakeover</span><span class="tag">SUID</span></div>
+</a>
+<a class="card" href="./pg-xposedapi.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">XposedAPI</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">WAFBypass</span><span class="tag">LFI</span><span class="tag">CommandInjection</span></div>
+</a>
+<a class="card" href="./pg-zenphoto.html">
+  <span class="badge pg">PG</span>
+  <span class="badge os">Linux</span>
+  <span class="card-title">ZenPhoto</span>
+  <div class="tags"><span class="tag">Linux</span><span class="tag">ZenPhoto</span><span class="tag">RCE</span><span class="tag">CVE</span></div>
+</a></div>
+</section>
+    
+  </main>
+  <footer class="foot">
+    Samson Laird · St. Louis ·
+    <a href="https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092" rel="noopener noreferrer" target="_blank">HTB profile</a>
+    · CTF notes
+  </footer>
+</body>
+</html>

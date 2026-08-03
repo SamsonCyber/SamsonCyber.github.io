@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Irked &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Irked</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">IRC</span><span class="tag">UnrealIRCd</span><span class="tag">steghide</span><span class="tag">SUID</span><span class="tag">CMDInjection</span><span class="tag">credentialhunting</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#unrealircd-3-2-8-1-backdoor">UnrealIRCd 3.2.8.1 Backdoor</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#steghide-djmardov">Steghide → djmardov</a><a class="lvl3" href="#suid-viewuser-root">SUID viewuser → Root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Irked is an easy Linux box with a memorable foothold: a backdoored build of <strong>UnrealIRCd 3.2.8.1</strong>, whose source was trojaned by an attacker years ago. From the IRC daemon's shell, a steganography hint leads to a password hidden in a JPEG with <strong>steghide</strong>, and root falls to a custom <strong>SUID</strong> binary that executes a file in <code>/tmp</code> I'm allowed to write.</p>
+<h2 id="recon">Recon</h2>
+<p>Web enumeration was thin, but the IRC ports run <strong>UnrealIRCd</strong>. That service/version is the lead.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="unrealircd-3-2-8-1-backdoor">UnrealIRCd 3.2.8.1 Backdoor</h3>
+<blockquote>
+<p><strong>The backdoor:</strong> in 2009, the official UnrealIRCd 3.2.8.1 archive was compromised, someone added a hidden command. Any data prefixed with <code>AB;</code> is passed straight to <code>system()</code>. So sending <code>AB;&lt;command&gt;</code> to the IRC port runs that command on the server. It's a supply-chain backdoor, not a memory bug.</p>
+</blockquote>
+<p>Using a <a href="https://github.com/Ranger11Danger/UnrealIRCd-3.2.8.1-Backdoor">PoC</a> with my IP/port and a bash reverse shell:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+ircd@irked:~/Unreal3.2$ whoami
+ircd
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="steghide-djmardov">Steghide → djmardov</h3>
+<p>A second user, <code>djmardov</code>, owned the <code>user.txt</code> I couldn't read. In their Documents was a <code>.backup</code> file:</p>
+<pre><code class="language-sh">cat .backup
+Super elite steg backup pw
+‹redacted›
+</code></pre>
+<p>The "steg" hint points at <strong>steghide</strong>, the password unlocks data hidden in an image on the web server:</p>
+<blockquote>
+<p><strong>What steghide does:</strong> it embeds (and password-protects) data inside the noise of an image or audio file. The visible picture looks normal; the payload is recovered only with the passphrase. The <code>.backup</code> text was that passphrase.</p>
+</blockquote>
+<pre><code class="language-sh">steghide extract -sf irked.jpg -p ‹redacted›
+wrote extracted data to &quot;pass.txt&quot;   -&gt;   ‹redacted›
+</code></pre>
+<p>That recovered password let me <code>su</code> to <code>djmardov</code>.</p>
+<h3 id="suid-viewuser-root">SUID viewuser → Root</h3>
+<p><code>djmardov</code> could run a custom SUID binary, <code>viewuser</code>, which tries to execute a missing file:</p>
+<pre><code class="language-sh">djmardov@irked:~$ viewuser
+...
+sh: 1: /tmp/listusers: not found
+</code></pre>
+<blockquote>
+<p><strong>The flaw:</strong> <code>viewuser</code> runs SUID-root but calls <code>/tmp/listusers</code>, a path any user can create. Whatever I put there runs as root. This is a classic case of a privileged binary trusting an attacker-writable location.</p>
+</blockquote>
+<pre><code class="language-sh">echo &quot;sh&quot; &gt; /tmp/listusers
+chmod +x /tmp/listusers
+viewuser
+# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Backdoored UnrealIRCd 3.2.8.1</strong> is a one-line RCE (<code>AB;cmd</code>), a reminder that supply-chain compromise predates the modern term for it.</li>
+<li><strong>"steg" hints mean steghide</strong>, a passphrase found in plaintext often unlocks a hidden file.</li>
+<li><strong>SUID binaries calling writable paths are instant root.</strong> <code>strings</code>/<code>ltrace</code> a custom SUID binary to find which file or command it trusts.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

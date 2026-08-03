@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hawat &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Hawat</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">SourceCodeReview</span><span class="tag">SQLi</span><span class="tag">DefaultCreds</span><span class="tag">PHP</span><span class="tag">RCE</span><span class="tag">credentialhunting</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#discovering-cloud-on-port-50080">Discovering /cloud on Port 50080</a><a class="lvl3" href="#phpinfo-document-root">phpinfo Document Root</a><a class="lvl2" href="#source-code-analysis">Source Code Analysis</a><a class="lvl3" href="#hardcoded-database-credentials">Hardcoded Database Credentials</a><a class="lvl3" href="#sql-injection-in-checkbypriority">SQL Injection in checkByPriority</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Hawat is a Linux box running three HTTP services on non-standard ports: an Issue Tracker Java application on port 17445, an nginx server on port 30455, and an Apache/PHP server on port 50080. The Apache server hosts a <code>/cloud</code> directory protected by default credentials, which contains a downloadable zip of the Issue Tracker's Java source code. Reviewing that source reveals both a hardcoded database password and an injectable SQL query. The SQLi endpoint runs on the Java app on port 17445 and can be leveraged for code execution through a file write to the PHP server's document root.</p>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, they document the recon, source code download, credential and SQLi discovery, and the document root path from phpinfo. The actual SQLi exploitation, shell delivery, and privilege escalation steps are not recorded. Written as in-progress.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE VERSION
+22/tcp    open  ssh     OpenSSH 8.4
+17445/tcp open  http    [Issue Tracker - Java/Spring]
+30455/tcp open  http    nginx 1.18.0
+50080/tcp open  http    Apache httpd 2.4.46 ((Unix) PHP/7.4.15)
+</code></pre>
+<p>Port 17445 serves a Java-based Issue Tracker with login and register endpoints visible in the nmap response body. Port 30455 is nginx serving a static W3.CSS template page. Port 50080 is Apache with PHP 7.4.15.</p>
+<h3 id="discovering-cloud-on-port-50080">Discovering /cloud on Port 50080</h3>
+<p>FeroxBuster finds a <code>/cloud</code> directory on port 50080. The directory presents a login portal accepting:</p>
+<pre><code>admin:admin
+</code></pre>
+<blockquote>
+<p><strong>Default credentials before enumeration.</strong> Before fuzzing or inspecting any further, <code>admin:admin</code> on an internal-looking panel is the single cheapest check. Here it works immediately, granting download access to the application source.</p>
+</blockquote>
+<p>After logging in, a zip file is available for download. Extracting it reveals the Issue Tracker Java source code.</p>
+<h3 id="phpinfo-document-root">phpinfo Document Root</h3>
+<p>FeroxBuster also finds <code>/phpinfo.php</code> on port 50080:</p>
+<pre><code>Document Root: /srv/http
+</code></pre>
+<p>This will be relevant for writing PHP files if the SQLi allows file writes.</p>
+<h2 id="source-code-analysis">Source Code Analysis</h2>
+<h3 id="hardcoded-database-credentials">Hardcoded Database Credentials</h3>
+<p>Inside the extracted zip, navigating to:</p>
+<pre><code>issuetracker/src/main/java/com/issue/tracker/issues/IssueController.java
+</code></pre>
+<p>The <code>checkByPriority</code> endpoint contains hardcoded database credentials:</p>
+<pre><code class="language-java">Properties connectionProps = new Properties();
+connectionProps.put(&quot;user&quot;, &quot;issue_user&quot;);
+connectionProps.put(&quot;password&quot;, &quot;‹redacted›&quot;);
+conn = DriverManager.getConnection(&quot;jdbc:mysql://localhost:3306/issue_tracker&quot;, connectionProps);
+</code></pre>
+<p>Credentials found:</p>
+<pre><code>issue_user:‹redacted›
+</code></pre>
+<h3 id="sql-injection-in-checkbypriority">SQL Injection in checkByPriority</h3>
+<p>The same function constructs a query by concatenating user input directly:</p>
+<pre><code class="language-java">String query = &quot;SELECT message FROM issue WHERE priority='&quot; + priority + &quot;'&quot;;
+Statement stmt = conn.createStatement();
+stmt.executeQuery(query);
+</code></pre>
+<blockquote>
+<p><strong>Why this query is injectable:</strong> the <code>priority</code> parameter from the HTTP request is placed directly into the SQL string without parameterization or escaping. An attacker can break out of the string literal with a single quote and inject arbitrary SQL, including <code>UNION SELECT</code>, <code>INTO OUTFILE</code>, or stacked queries depending on the MySQL configuration. The <code>INTO OUTFILE</code> variant is particularly relevant here since the MySQL process may have write access to <code>/srv/http</code>, the Apache document root revealed by phpinfo.</p>
+</blockquote>
+<p>The vulnerable endpoint is:</p>
+<pre><code>GET /issue/checkByPriority?priority=&lt;injection&gt;
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Non-standard ports get full enumeration.</strong> Three HTTP services on three different ports, each with distinct attack surfaces. Skipping any one of them would have broken the chain.</li>
+<li><strong>Source code zip files handed out via default creds are a complete roadmap.</strong> Hardcoded passwords, injectable queries, and database schema, all in the first file reviewed.</li>
+<li><strong>phpinfo leaks the document root</strong>, which turns a MySQL <code>INTO OUTFILE</code> SQLi into a PHP webshell write primitive.</li>
+<li><strong>Credential reuse is worth checking.</strong> <code>issue_user:‹redacted›</code> is a MySQL user, but the same password may authenticate to SSH or other services on the host.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

