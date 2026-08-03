@@ -59,5 +59,25 @@ describe('static dist entry', () => {
     assert.match(html, /class=["']grid["']|class=["']card["']/)
     assert.match(html, /htb-active|Garbleworks|CTF Writeups/i)
   })
+
+  it('includes credential badge mount for Three.js access pass', () => {
+    const html = fs.readFileSync(distHtml, 'utf8')
+    assert.match(html, /id=["']credential-badge["']/)
+    assert.match(html, /access credential/i)
+  })
+
+  it('does not ship vibe-coded coral bar / toy title chrome', () => {
+    const html = fs.readFileSync(distHtml, 'utf8')
+    assert.doesNotMatch(html, /hero__title-accent/)
+    assert.doesNotMatch(html, /border-top:\s*3px solid var\(--coral\)/)
+    const cssPath = path.join(root, 'dist', 'assets')
+    const cssFiles = fs.readdirSync(cssPath).filter((f) => f.endsWith('.css'))
+    assert.ok(cssFiles.length >= 1)
+    const css = fs.readFileSync(path.join(cssPath, cssFiles[0]), 'utf8')
+    // Hire palette uses teal accent, not coral rail chrome
+    assert.match(css, /--accent/)
+    assert.doesNotMatch(css, /--coral:\s*#ff5c39/)
+    assert.doesNotMatch(css, /border-top:\s*3px solid/)
+  })
 })
 

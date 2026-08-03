@@ -3,33 +3,29 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SAMSON · Samson Laird · LLM / Agent Security &amp; Agentic Trading</title>
+  <title>Samson Laird · LLM / Agent Security</title>
   <meta name="description" content="Samson Laird. LLM and agent security engineer, OSCP, agentic trading systems. St. Louis. Detectors, red-team harnesses, control planes. GitHub SamsonCyber." />
   <meta name="author" content="Samson Laird" />
-  <meta name="theme-color" content="#080a0e" />
+  <meta name="theme-color" content="#0a0e14" />
   <link rel="canonical" href="https://samsoncyber.github.io/" />
 
   <meta property="og:type" content="website" />
-  <meta property="og:title" content="SAMSON · Samson Laird" />
+  <meta property="og:title" content="Samson Laird · LLM / Agent Security" />
   <meta property="og:description" content="LLM / agent security and agentic trading. OSCP. St. Louis. Public tools: Garbleworks, StegOFF, field guide, agent control planes." />
   <meta property="og:url" content="https://samsoncyber.github.io/" />
 
   <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="SAMSON · Samson Laird" />
+  <meta name="twitter:title" content="Samson Laird · LLM / Agent Security" />
   <meta name="twitter:description" content="LLM / agent security and agentic trading. OSCP. St. Louis." />
 
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230e1014'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='system-ui,sans-serif' font-weight='800' font-size='12' fill='%23ff5c39'%3ES%3C/text%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230a0e14'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='system-ui,sans-serif' font-weight='700' font-size='12' fill='%235eead4'%3ES%3C/text%3E%3C/svg%3E" />
 
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
   <canvas id="bg" aria-hidden="true"></canvas>
   <div class="vignette" aria-hidden="true"></div>
-  <div class="grain" aria-hidden="true"></div>
 
   <div class="site">
     <header class="topbar">
@@ -48,23 +44,28 @@
     <main id="main">
       <section class="hero" id="top" aria-labelledby="hero-title">
         <div class="hero__left">
-          <p class="hero__eyebrow">St. Louis · OSCP</p>
-          <h1 class="hero__title" id="hero-title"><span class="hero__title-accent">S</span><span>AMSON</span></h1>
-          <p class="sr-name">Samson Laird</p>
-          <p class="hero__status">Open to LLM security · agent control planes · red team</p>
-        </div>
-        <div class="hero__right">
-          <p class="hero__role" id="hero-role">LLM / agent security &amp; agentic trading</p>
+          <p class="hero__greeting">Hi, I am</p>
+          <h1 class="hero__title" id="hero-title">Samson Laird</h1>
+          <p class="sr-only">Also known as SAMSON</p>
+          <p class="hero__role" id="hero-role">LLM / agent security and agentic trading. OSCP.</p>
           <p class="hero__lede" id="hero-lede">I build detectors, red-team harnesses, and control planes for tool-using agents, and agentic systems that trade under the same kind of gates. Mechanism first. Measure, then claim.</p>
           <div class="hero__actions">
             <a class="btn btn--primary" href="#work">Selected work</a>
             <a class="btn btn--ghost" id="btn-email" href="mailto:shotgunsamm6@gmail.com">Email</a>
           </div>
         </div>
+        <div class="hero__right">
+          <div
+            class="hero__badge"
+            id="credential-badge"
+            role="img"
+            aria-label="Interactive access credential badge for Samson Laird, OSCP, LLM and agent security. Drag to swing."
+          >
+            <p class="hero__badge-hint" id="badge-hint">Drag the credential</p>
+          </div>
+        </div>
       </section>
 
-      <!-- Static contact + projects hydrate/overwrite via main.js when JS runs.
-           Present in the document so crawlers and no-JS still see the resume surface. -->
       <section class="contact-strip" id="contact" aria-label="Contact">
         <div class="contact-strip__grid" id="contact-grid">
           <div class="contact-cell">
@@ -92,9 +93,7 @@
 
       <section class="section" id="work" aria-labelledby="work-title">
         <div class="section__head">
-          <div>
-            <h2 class="section__title" id="work-title">Projects</h2>
-          </div>
+          <h2 class="section__title" id="work-title">Projects</h2>
           <div class="filters" role="group" aria-label="Filter projects by lane">
             <button type="button" class="filter-btn" data-lane="all" aria-pressed="true">All</button>
             <button type="button" class="filter-btn" data-lane="security" aria-pressed="false">Security</button>
@@ -183,8 +182,8 @@
         </ul>
       </section>
 
-      <section class="section section--approach" id="approach" aria-labelledby="approach-title">
-        <div class="section__head section__head--solo">
+      <section class="section" id="approach" aria-labelledby="approach-title">
+        <div class="section__head">
           <h2 class="section__title" id="approach-title">Approach</h2>
         </div>
         <div class="approach-grid" id="approach-grid">
@@ -204,7 +203,7 @@
       </section>
 
       <section class="section" id="background" aria-labelledby="background-title">
-        <div class="section__head section__head--solo">
+        <div class="section__head">
           <h2 class="section__title" id="background-title">Background</h2>
         </div>
         <div class="resume-block" id="resume-block">
@@ -227,7 +226,7 @@
       </section>
 
       <section class="section" id="connect" aria-labelledby="connect-title">
-        <div class="section__head section__head--solo">
+        <div class="section__head">
           <h2 class="section__title" id="connect-title">Connect</h2>
         </div>
         <ul class="link-row" id="link-row">
@@ -241,7 +240,7 @@
     </main>
 
     <footer class="footer">
-      <p>Samson Laird · St. Louis · 2026</p>
+      <p>Samson Laird · St. Louis</p>
       <p class="footer__links">
         <a href="mailto:shotgunsamm6@gmail.com">Email</a>
         <a href="https://github.com/SamsonCyber" rel="noopener noreferrer" target="_blank">GitHub</a>

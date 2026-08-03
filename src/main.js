@@ -7,6 +7,7 @@ import {
   filterProjects,
 } from './content.js'
 import { startFlowField } from './motion.js'
+import { startCredentialBadge } from './badge.js'
 
 // Boot-time content guard (surfaced in console if model drifts)
 const check = validateContent()
@@ -28,6 +29,17 @@ if (ledeEl) ledeEl.textContent = SITE.lede
 
 const roleEl = document.getElementById('hero-role')
 if (roleEl) roleEl.textContent = SITE.roleLine
+
+// ── Access credential badge (Three.js) ──────────────────
+const badgeMount = document.getElementById('credential-badge')
+let badgeHandle = null
+if (badgeMount) {
+  badgeHandle = startCredentialBadge(badgeMount)
+  if (badgeHandle.mode === 'static') {
+    const hint = document.getElementById('badge-hint')
+    if (hint) hint.hidden = true
+  }
+}
 
 // ── Contact strip ───────────────────────────────────────
 function buildContactStrip() {
@@ -227,5 +239,6 @@ export { SITE, PROJECTS, validateContent, filterProjects }
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     motionHandle?.destroy()
+    badgeHandle?.destroy()
   })
 }
