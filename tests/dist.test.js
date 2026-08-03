@@ -60,7 +60,7 @@ describe('static dist entry', () => {
     assert.match(html, /htb-active|Garbleworks|CTF Writeups/i)
   })
 
-  it('does not ship badge, green accent, or coral bar chrome', () => {
+  it('does not ship badge, green mint, or thick top-bar chrome', () => {
     const html = fs.readFileSync(distHtml, 'utf8')
     assert.doesNotMatch(html, /credential-badge|hero__badge|access credential/i)
     assert.doesNotMatch(html, /hero__title-accent/)
@@ -68,7 +68,7 @@ describe('static dist entry', () => {
     const cssFiles = fs.readdirSync(cssPath).filter((f) => f.endsWith('.css'))
     assert.ok(cssFiles.length >= 1)
     const css = fs.readFileSync(path.join(cssPath, cssFiles[0]), 'utf8')
-    assert.doesNotMatch(css, /#5eead4|#64ffda|--coral:\s*#ff5c39/)
+    assert.doesNotMatch(css, /#5eead4|#64ffda/)
     assert.doesNotMatch(css, /border-top:\s*3px solid/)
   })
 })

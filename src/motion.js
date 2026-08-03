@@ -18,7 +18,7 @@ export function startFlowField(canvas, opts = {}) {
   const ctx = canvas.getContext('2d')
   if (!ctx) return { destroy() {}, mode: 'static' }
 
-  const voidBg = '#0a0e14'
+  const voidBg = '#090b10'
 
   if (mode === 'static') {
     const paint = () => {
