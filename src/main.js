@@ -108,7 +108,7 @@ function renderProjects(lane = 'all') {
   if (live) {
     const label =
       lane === 'all' ? 'All lanes' : lane.charAt(0).toUpperCase() + lane.slice(1)
-    live.textContent = `${items.length} project${items.length === 1 ? '' : 's'} · ${label}`
+    live.textContent = `${items.length} project${items.length === 1 ? '' : 's'} - ${label}`
   }
 }
 
@@ -206,7 +206,10 @@ function observeReveals(nodes) {
       { rootMargin: '0px 0px -8% 0px', threshold: 0.08 }
     )
   }
-  nodes.forEach((n) => revealObserver.observe(n))
+  nodes.forEach((n, i) => {
+    n.style.setProperty('--stagger', `${Math.min(i, 8) * 0.045}s`)
+    revealObserver.observe(n)
+  })
 }
 
 // ── Init ────────────────────────────────────────────────

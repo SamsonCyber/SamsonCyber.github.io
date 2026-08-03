@@ -22,13 +22,14 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
   <canvas id="bg" aria-hidden="true"></canvas>
   <div class="vignette" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
 
   <div class="site">
     <header class="topbar">
@@ -47,7 +48,7 @@
     <main id="main">
       <section class="hero" id="top" aria-labelledby="hero-title">
         <div class="hero__left">
-          <p class="hero__eyebrow">Portfolio · St. Louis</p>
+          <p class="hero__eyebrow">St. Louis</p>
           <h1 class="hero__title" id="hero-title"><span>SAMSON</span></h1>
           <p class="sr-name">Samson Laird</p>
         </div>
@@ -91,7 +92,6 @@
       <section class="section" id="work" aria-labelledby="work-title">
         <div class="section__head">
           <div>
-            <p class="section__label">Selected work</p>
             <h2 class="section__title" id="work-title">Projects</h2>
           </div>
           <div class="filters" role="group" aria-label="Filter projects by lane">
@@ -101,7 +101,7 @@
             <button type="button" class="filter-btn" data-lane="tradecraft" aria-pressed="false">Tradecraft</button>
           </div>
         </div>
-        <p id="project-live" class="project-live" aria-live="polite">8 projects · All lanes</p>
+        <p id="project-live" class="project-live" aria-live="polite">8 projects - All lanes</p>
         <ul class="project-list" id="project-list">
           <li class="project" data-lane="security" data-id="garbleworks">
             <div class="project__meta">LLM red team</div>
@@ -182,12 +182,9 @@
         </ul>
       </section>
 
-      <section class="section" id="approach" aria-labelledby="approach-title">
-        <div class="section__head">
-          <div>
-            <p class="section__label">How I work</p>
-            <h2 class="section__title" id="approach-title">Approach</h2>
-          </div>
+      <section class="section section--approach" id="approach" aria-labelledby="approach-title">
+        <div class="section__head section__head--solo">
+          <h2 class="section__title" id="approach-title">Approach</h2>
         </div>
         <div class="approach-grid" id="approach-grid">
           <article class="approach-card">
@@ -206,11 +203,8 @@
       </section>
 
       <section class="section" id="background" aria-labelledby="background-title">
-        <div class="section__head">
-          <div>
-            <p class="section__label">Resume</p>
-            <h2 class="section__title" id="background-title">Background</h2>
-          </div>
+        <div class="section__head section__head--solo">
+          <h2 class="section__title" id="background-title">Background</h2>
         </div>
         <div class="resume-block" id="resume-block">
           <article class="resume-item">
@@ -232,11 +226,8 @@
       </section>
 
       <section class="section" id="connect" aria-labelledby="connect-title">
-        <div class="section__head">
-          <div>
-            <p class="section__label">Elsewhere</p>
-            <h2 class="section__title" id="connect-title">Connect</h2>
-          </div>
+        <div class="section__head section__head--solo">
+          <h2 class="section__title" id="connect-title">Connect</h2>
         </div>
         <ul class="link-row" id="link-row">
           <li><a href="https://github.com/SamsonCyber" rel="noopener noreferrer" target="_blank">GitHub</a></li>
