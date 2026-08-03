@@ -9,7 +9,7 @@
     "build": "node scripts/build-writeups-index.mjs && vite build",
     "preview": "vite preview",
     "test": "node --test tests/*.test.js",
-    "verify": "node --test tests/*.test.js && vite build",
+    "verify": "npm run build && node --test tests/*.test.js",
     "capture": "node scripts/capture-proof.mjs http://127.0.0.1:4177/"
   },
   "dependencies": {
