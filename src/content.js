@@ -6,11 +6,10 @@
 export const SITE = {
   name: 'Samson Laird',
   titleWord: 'SAMSON',
-  roleLine: 'LLM / agent security & agentic trading · OSCP',
+  roleLine: 'LLM / agent security & agentic trading · OSCP in progress',
   location: 'St. Louis, Missouri',
   lede:
     'I build detectors, red-team harnesses, and control planes for tool-using agents, and agentic systems that trade under the same kind of gates. Mechanism first. Measure, then claim.',
-  resume: './resume.pdf',
   stats: [
     { value: '101', label: 'CTF writeups' },
     { value: '8', label: 'projects' },
@@ -156,7 +155,7 @@ export const EXPERIENCE = {
   offensive: {
     title: 'Offensive security',
     summary:
-      'OSCP. 100+ machines rooted across HTB, Proving Grounds, TryHackMe, and VulnHub. Active Directory chains, Linux and Windows privilege escalation. Writeups published for retired boxes.',
+      'OSCP in progress. 100+ machines rooted across HTB, Proving Grounds, TryHackMe, and VulnHub. Active Directory chains, Linux and Windows privilege escalation. Writeups published for retired boxes.',
   },
 }
 

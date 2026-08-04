@@ -167,7 +167,7 @@ function buildResume() {
     </article>
     <article class="resume-item reveal">
       <h3>${escapeHtml(e.offensive.title)}</h3>
-      <p class="resume-item__sub">OSCP · lab and CTF</p>
+      <p class="resume-item__sub">OSCP in progress · lab and CTF</p>
       <p>${escapeHtml(e.offensive.summary)}</p>
     </article>
     <article class="resume-item reveal">
