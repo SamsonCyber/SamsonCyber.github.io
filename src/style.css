@@ -456,11 +456,25 @@ a:focus-visible {
 }
 
 .contact-cell__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   font-size: 0.68rem;
   font-family: var(--font-mono);
   color: var(--text-mute);
   letter-spacing: 0.07em;
   text-transform: uppercase;
+}
+
+.contact-cell__icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--heat);
+  opacity: 0.85;
+}
+
+.contact-cell__icon svg {
+  display: block;
 }
 
 .contact-cell a,

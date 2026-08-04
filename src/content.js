@@ -9,7 +9,7 @@ export const SITE = {
   roleLine: 'LLM / agent security & agentic trading · OSCP in progress',
   location: 'St. Louis, Missouri',
   lede:
-    'I build detectors, red-team harnesses, and control planes for tool-using agents, and agentic systems that trade under the same kind of gates. Mechanism first. Measure, then claim.',
+    'IT support engineer building the security stack for tool-using agents: detectors, red-team harnesses, and control planes.',
   stats: [
     { value: '101', label: 'CTF writeups' },
     { value: '8', label: 'projects' },
@@ -34,10 +34,13 @@ export const SITE = {
     email: 'shotgunsamm6@gmail.com',
     github: 'https://github.com/SamsonCyber',
     githubLabel: 'github.com/SamsonCyber',
+    githubHandle: 'SamsonCyber',
     linkedin: 'https://www.linkedin.com/in/sam-laird-50446021b/',
     linkedinLabel: 'linkedin.com/in/sam-laird-50446021b',
+    linkedinHandle: 'in/sam-laird',
     htb: 'https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092',
     htbLabel: 'Samsonnn',
+    htbHandle: 'Samsonnn',
   },
   external: [
     { label: 'GitHub', href: 'https://github.com/SamsonCyber' },
