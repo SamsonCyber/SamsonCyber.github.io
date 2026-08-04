@@ -10,6 +10,13 @@ export const SITE = {
   location: 'St. Louis, Missouri',
   lede:
     'I build detectors, red-team harnesses, and control planes for tool-using agents, and agentic systems that trade under the same kind of gates. Mechanism first. Measure, then claim.',
+  resume: './resume.pdf',
+  stats: [
+    { value: '101', label: 'CTF writeups' },
+    { value: '8', label: 'projects' },
+    { value: '324', label: 'injection techniques cataloged' },
+    { value: '100+', label: 'machines rooted' },
+  ],
   howIWork: [
     {
       title: 'Mechanism first',
@@ -37,7 +44,7 @@ export const SITE = {
     { label: 'GitHub', href: 'https://github.com/SamsonCyber' },
     { label: 'LinkedIn', href: 'https://www.linkedin.com/in/sam-laird-50446021b/' },
     {
-      label: 'Samsonnn',
+      label: 'HTB',
       href: 'https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092',
     },
     { label: 'Field guide (live)', href: 'https://samsoncyber.github.io/llm-injection-field-guide/' },
