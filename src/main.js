@@ -29,6 +29,21 @@ if (ledeEl) ledeEl.textContent = SITE.lede
 const roleEl = document.getElementById('hero-role')
 if (roleEl) roleEl.textContent = SITE.roleLine
 
+// ── Stats ─────────────────────────────────────────────
+function buildStats() {
+  const grid = document.getElementById('stats-grid')
+  if (!grid) return
+  grid.innerHTML = SITE.stats
+    .map(
+      (s) => `
+    <div class="stat">
+      <span class="stat__value">${escapeHtml(s.value)}</span>
+      <span class="stat__label">${escapeHtml(s.label)}</span>
+    </div>`
+    )
+    .join('')
+}
+
 // ── Contact strip ───────────────────────────────────────
 function buildContactStrip() {
   const grid = document.getElementById('contact-grid')
@@ -213,6 +228,7 @@ function observeReveals(nodes) {
 }
 
 // ── Init ────────────────────────────────────────────────
+buildStats()
 buildContactStrip()
 renderProjects('all')
 wireFilters()
