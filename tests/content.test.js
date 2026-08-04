@@ -25,7 +25,7 @@ describe('content model', () => {
   it('rejects example.com and placeholder hrefs', () => {
     assert.equal(isValidPublicHref('https://example.com/foo'), false)
     assert.equal(isValidPublicHref('https://github.com/SamsonCyber/stegoff'), true)
-    assert.equal(isValidPublicHref('mailto:shotgunsamm6@gmail.com'), true)
+    assert.equal(isValidPublicHref('mailto:sam.lairdd@gmail.com'), true)
     assert.equal(isValidPublicHref('./writeups/'), true)
     assert.equal(isValidPublicHref(null), true)
     for (const bad of FORBIDDEN_HREF_SNIPPETS) {

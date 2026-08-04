@@ -31,7 +31,7 @@ export const SITE = {
     },
   ],
   contacts: {
-    email: 'shotgunsamm6@gmail.com',
+    email: 'sam.lairdd@gmail.com',
     github: 'https://github.com/SamsonCyber',
     githubLabel: 'github.com/SamsonCyber',
     githubHandle: 'SamsonCyber',
