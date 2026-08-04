@@ -28,14 +28,14 @@ export const SITE = {
     email: 'shotgunsamm6@gmail.com',
     github: 'https://github.com/SamsonCyber',
     githubLabel: 'github.com/SamsonCyber',
-    linkedin: 'https://linkedin.com/in/samsonlaird',
-    linkedinLabel: 'linkedin.com/in/samsonlaird',
+    linkedin: 'https://www.linkedin.com/in/sam-laird-50446021b/',
+    linkedinLabel: 'linkedin.com/in/sam-laird-50446021b',
     htb: 'https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092',
     htbLabel: 'Samsonnn',
   },
   external: [
     { label: 'GitHub', href: 'https://github.com/SamsonCyber' },
-    { label: 'LinkedIn', href: 'https://linkedin.com/in/samsonlaird' },
+    { label: 'LinkedIn', href: 'https://www.linkedin.com/in/sam-laird-50446021b/' },
     {
       label: 'Samsonnn',
       href: 'https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092',
