@@ -763,6 +763,18 @@ a.project__name:hover {
   color: var(--text-mute);
 }
 
+.footer__place {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.footer__place svg {
+  display: block;
+  color: var(--heat);
+  opacity: 0.8;
+}
+
 .footer__links {
   display: flex;
   flex-wrap: wrap;
