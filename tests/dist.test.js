@@ -23,7 +23,7 @@ describe('static dist entry', () => {
     assert.match(html, /SAMSON/)
     assert.match(html, /mailto:shotgunsamm6@gmail\.com/)
     assert.match(html, /github\.com\/SamsonCyber/i)
-    assert.match(html, /linkedin\.com\/in\/samsonlaird/i)
+    assert.match(html, /linkedin\.com\/in\/sam-laird-50446021b/i)
     assert.match(html, /profile\.hackthebox\.com\/profile\/019c8240-5890-72f0-8ff8-e8b4e1792092/)
     assert.doesNotMatch(html, /example\.com/)
     assert.doesNotMatch(html, /your-email|placeholder@/i)
