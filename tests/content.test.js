@@ -57,7 +57,17 @@ describe('content model', () => {
   it('filterProjects returns subsets', () => {
     assert.equal(filterProjects('all').length, PROJECTS.length)
     assert.ok(filterProjects('security').every((p) => p.lane === 'security'))
-    assert.ok(filterProjects('tradecraft').every((p) => p.lane === 'tradecraft'))
+    assert.ok(filterProjects('trading').every((p) => p.lane === 'trading'))
+    const cantina = PROJECTS.find((p) => p.id === 'cantina')
+    assert.ok(cantina)
+    assert.equal(cantina.lane, 'security')
+  })
+
+  it('role line is one line with OSCP status', () => {
+    assert.equal(
+      SITE.roleLine,
+      'LLM / agent security & agentic trading · OSCP in progress'
+    )
   })
 
   it('selectMotionMode respects reduced motion', () => {

@@ -120,7 +120,7 @@ export const PROJECTS = [
   {
     id: 'cantina',
     name: 'Cantina',
-    lane: 'tradecraft',
+    lane: 'security',
     tag: 'OSCP recon',
     blurb:
       'OSCP-legal network recon orchestrator: port scan, service enum plugins, multi-target timeouts. Enumeration only. No exploit auto-run.',
@@ -229,7 +229,7 @@ export function validateContent() {
 }
 
 /**
- * @param {'all' | 'security' | 'trading' | 'tradecraft'} lane
+ * @param {'all' | 'security' | 'trading'} lane
  */
 export function filterProjects(lane) {
   if (lane === 'all') return PROJECTS.slice()

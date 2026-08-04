@@ -249,13 +249,20 @@ a:focus-visible {
 }
 
 .hero__role {
-  font-size: clamp(1.15rem, 1rem + 0.45vw, 1.35rem);
+  font-size: clamp(0.95rem, 0.82rem + 0.55vw, 1.28rem);
   font-weight: 500;
   color: var(--text-dim);
-  max-width: 26rem;
+  max-width: none;
   line-height: 1.35;
   margin-bottom: 1.15rem;
   letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  .hero__role {
+    white-space: normal;
+  }
 }
 
 .hero__lede {
