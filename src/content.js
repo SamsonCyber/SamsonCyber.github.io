@@ -31,13 +31,13 @@ export const SITE = {
     linkedin: 'https://linkedin.com/in/samsonlaird',
     linkedinLabel: 'linkedin.com/in/samsonlaird',
     htb: 'https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092',
-    htbLabel: 'Hack The Box',
+    htbLabel: 'Samsonnn',
   },
   external: [
     { label: 'GitHub', href: 'https://github.com/SamsonCyber' },
     { label: 'LinkedIn', href: 'https://linkedin.com/in/samsonlaird' },
     {
-      label: 'Hack The Box',
+      label: 'Samsonnn',
       href: 'https://profile.hackthebox.com/profile/019c8240-5890-72f0-8ff8-e8b4e1792092',
     },
     { label: 'Field guide (live)', href: 'https://samsoncyber.github.io/llm-injection-field-guide/' },
