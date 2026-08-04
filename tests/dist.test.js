@@ -21,7 +21,7 @@ describe('static dist entry', () => {
   it('ships SAMSON title and real contact hrefs (not placeholders)', () => {
     const html = fs.readFileSync(distHtml, 'utf8')
     assert.match(html, /SAMSON/)
-    assert.match(html, /mailto:shotgunsamm6@gmail\.com/)
+    assert.match(html, /mailto:sam\.lairdd@gmail\.com/)
     assert.match(html, /github\.com\/SamsonCyber/i)
     assert.match(html, /linkedin\.com\/in\/sam-laird-50446021b/i)
     assert.match(html, /profile\.hackthebox\.com\/profile\/019c8240-5890-72f0-8ff8-e8b4e1792092/)
